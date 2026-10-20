@@ -16,6 +16,7 @@
     --ink: #000000;
     --disabled: #8a8a8a;
     --refuse: #c00000;
+    --offgain: #0040c0;    /* realised gain more than 1% off the typed gain */
   }
   html, body { margin: 0; background: #bdbdbd; }
   body { font: 12px Arial, Helvetica, sans-serif; color: var(--ink); }
@@ -100,6 +101,7 @@
   #results td.val { background: #fff; border: 1px solid var(--shadow); }
   #results td.rowhead { text-align: right; padding-right: 4px; }
   #results td.error { color: var(--refuse); text-align: left; }
+  #results td.offgain { color: var(--offgain); font-weight: bold; }
   #results tr.totals td.val { border-top: 2px solid var(--shadow); }
 </style>
 </head>
@@ -239,8 +241,8 @@
       6.81, 6.98, 7.15, 7.32, 7.50, 7.68, 7.87, 8.06, 8.25, 8.45, 8.66, 8.87, 9.09, 9.31, 9.53, 9.76],
   };
 
-  // Prefix letters -> power of ten. 'm' (milli) and 'M' (mega) are case-sensitive;
-  // the rest are case-insensitive (handled by lower-casing everything but m/M).
+  // Prefix letters -> power of ten. 'm' (milli), 'M' (mega) and 'G' (giga) are
+  // case-sensitive; the rest are case-insensitive (lower-cased before lookup).
   const PREFIX = { p: -12, n: -9, u: -6, 'µ': -6, 'μ': -6, m: -3, k: 3, M: 6, G: 9 };
 
   // "4.7n", "4n7", "4700p", "10K", "1.5M", "20000" -> number.
@@ -255,7 +257,7 @@
     const [, whole, frac, prefix, tail] = m;
     if (tail !== undefined && (frac !== undefined || !prefix)) return NaN;
     let exp = 0;
-    if (prefix) exp = PREFIX[prefix === 'K' ? 'k' : (prefix === 'm' || prefix === 'M' ? prefix : prefix.toLowerCase())];
+    if (prefix) exp = PREFIX['mMG'.includes(prefix) ? prefix : prefix.toLowerCase()];
     const mantissa = whole + '.' + (frac !== undefined ? frac : tail !== undefined ? tail : '0');
     const v = Number(mantissa + 'e' + exp);
     return v > 0 ? v : NaN;
@@ -536,11 +538,25 @@
     else return fail(`Unknown circuit: ${circuit}`);
 
     if (out.error) return fail(out.error);
-    // A cap computed from an entered one can still land above the limit.
+    // Safety net: the solvers below refuse a computed cap above 1uF with a
+    // specific message; this catches any case they miss.
     for (const [name, v] of Object.entries(out.parts)) {
-      if (name[0] === 'C' && v > MAX_CAP) return fail(CAP_LIMIT_MSG);
+      if (name[0] === 'C' && v > MAX_CAP) return fail(`${name} would be ${formatEng(v)}, above the 1uF limit.`);
     }
     return { stage: st, circuit, parts: out.parts, gainActual: out.gainActual, error: null };
+  }
+
+  // Refusal for a cap computed from an entered one that would pass 1uF, e.g.
+  // "C1 = 470n needs C2 ≥ 1.13u, above the 1uF limit; use a smaller C1".
+  function partnerOverLimit(entered, value, needed, min) {
+    return `${entered} = ${formatEng(value)} needs ${needed} ≥ ${formatEng(min)}, above the 1uF limit; ` +
+      `use a smaller ${entered}`;
+  }
+
+  // True when the realised gain is more than 1% off the typed one.
+  // (typed null = Gain left blank: nothing to compare.)
+  function gainDiffers(typed, actual) {
+    return typed != null && actual != null && Math.abs(actual - typed) > 0.01 * Math.abs(typed);
   }
 
   // ---- Real pole: one RC, then a unity buffer ----------------------------------
@@ -584,6 +600,9 @@
         if (!(next > big)) break;
         big = next;
       }
+      // Never choose a partner above 1uF. 1uF is on every series; the caller
+      // refuses (with the bound) if even that ratio is too small.
+      big = Math.min(big, MAX_CAP);
     } else {
       // Keep the big cap at or under 1uF: at very low fn, C0 alone exceeds it,
       // so slide the centre down (the resistors scale up to compensate).
@@ -627,6 +646,9 @@
     }
     // Tiny tolerance so a ratio exactly at the bound isn't refused by float noise.
     if (C2 / C1 < minRatio * (1 - 1e-12)) {
+      if (entry.c2 == null && minRatio * C1 > MAX_CAP) {
+        return { error: partnerOverLimit('C1', C1, 'C2', minRatio * C1) };
+      }
       return { error: `C2 must be ≥ ${formatEng(minRatio * C1)} for Q = ${Q.toFixed(2)} at gain ${G}` };
     }
 
@@ -681,6 +703,9 @@
     }
     // Tiny tolerance so a ratio exactly at the bound isn't refused by float noise.
     if (Cf / Cg < minRatio * (1 - 1e-12)) {
+      if (entry.c1 == null && minRatio * Cg > MAX_CAP) {
+        return { error: partnerOverLimit('C2', Cg, 'C1', minRatio * Cg) };
+      }
       return { error: `C1/C2 must be ≥ ${minRatio.toFixed(2)} for Q = ${Q.toFixed(2)} at gain ${K}` };
     }
 
@@ -741,14 +766,34 @@
   //   ω0²    = 1/(R1·R2·C2·C3)
   //   ω0/Q   = (C1+C2+C3)/(R2·C2·C3)   →   R2 = Q·(C1+C2+C3)/(ω0·C2·C3)
   // Any Q is realizable: no cap ratio constraint.
-  // Default caps: C1 = C2 = round(C0), C3 = round(C1/G). R2 (sets Q) is
+  // Default caps: C1 = C2 = round(C0), with C0 lowered for G < 1 so that
+  // C3 = C1/G stays at or under 1uF. C3 is the series value log-nearest to
+  // C1/G, i.e. the one whose C1/C3 is closest to G. (Both caps on the series
+  // means the gain can land a few % off; the table marks it.) R2 (sets Q) is
   // rounded first; R1 (sets fn) is recomputed from the rounded R2.
+  // Entered C1 and C3 fix the gain, so a typed Gain that disagrees with
+  // them by more than 1% is refused rather than ignored.
   function solveMfbHighPass(ctx) {
     const { st, entry, w0 } = ctx;
     const Q = st.q, G = st.gain;
     if (!(G > 0)) return { error: `Gain must be > 0 (got ${G})` };
-    const { C1, C2 } = equalCaps(ctx, ctx.c0);
+    let { C1, C2 } = equalCaps(ctx, Math.min(ctx.c0, G * MAX_CAP));
+    // Rounding C1 up can still push C1/G past 1uF: step the default pair down.
+    if (entry.c1 == null && entry.c2 == null) {
+      while (ctx.roundC(C1 / G) > MAX_CAP) {
+        const next = stepSeries(C1, ctx.capSeries, -1);
+        if (!(next < C1)) break;
+        C1 = C2 = next;
+      }
+    }
+    if (entry.c1 != null && entry.c3 != null && gainDiffers(entry.gain, C1 / entry.c3)) {
+      return { error: `C1/C3 sets gain = ${(C1 / entry.c3).toFixed(2)}; clear Gain or change C1/C3` };
+    }
     const C3 = entry.c3 != null ? entry.c3 : ctx.roundC(C1 / G);
+    if (C3 > MAX_CAP) {
+      return { error: `C1 = ${formatEng(C1)} at gain ${G} needs C3 = ${formatEng(C1 / G)}, above the 1uF limit; ` +
+        `use a smaller C1 or a gain ≥ ${(C1 / MAX_CAP).toFixed(2)}` };
+    }
     const R2 = ctx.roundR(Q * (C1 + C2 + C3) / (w0 * C2 * C3));
     const R1 = ctx.roundR(1 / (w0 * w0 * R2 * C2 * C3));
     return { parts: { R1, R2, C1, C2, C3 }, gainActual: C1 / C3 };
@@ -860,7 +905,7 @@
     return { parts, gainActual: parts.R6 / R4 };
   }
 
-  window.FH.solve = { stage, skMinRatio };
+  window.FH.solve = { stage, skMinRatio, gainDiffers };
 })();
 </script>
 <script data-module="response">
@@ -1300,8 +1345,18 @@
     return FH.stages.build(s).map(st => FH.solve.stage(st, s.circuit, s.entries[st.label] || {}, opts));
   }
 
+  // The Gain the user typed for this stage, or null if the box is blank.
+  function typedGain(solved) {
+    const e = state.entries[solved.stage.label];
+    return e && typeof e.gain === 'number' ? e.gain : null;
+  }
+
+  // True when the rounded parts give a gain more than 1% off the typed one.
+  const gainOff = solved => !solved.error && FH.solve.gainDiffers(typedGain(solved), solved.gainActual);
+
   // Results table: one row per stage plus Totals, then the summary line.
-  //   Passband Gain  from the rounded parts (gainActual); Real is always 1.0
+  //   Passband Gain  from the rounded parts (gainActual); Real is always 1.0.
+  //                  Marked "*" (blue) when more than 1% off the typed Gain.
   //   Fn, Q          the stage targets
   //   Gain, Phase    at the cursor, from the rounded parts. A stage's gain
   //                  includes its own passband gain. Phase leaves out the
@@ -1318,8 +1373,10 @@
       if (s.error) return `<tr>${head}<td class="val error" colspan="6">${esc(s.error)}</td></tr>`;
       const p = FH.response.point([s], cursor, null);
       const gbp = FH.response.requiredGBP(s);
-      return '<tr>' + head +
-        cell(st.kind === 'real' ? '1.0' : s.gainActual.toPrecision(3)) +
+      const gainCell = st.kind === 'real' ? cell('1.0')
+        : gainOff(s) ? `<td class="val offgain" title="Typed gain ${esc(plain(typedGain(s)))}">${esc(s.gainActual.toPrecision(3))}*</td>`
+        : cell(s.gainActual.toPrecision(3));
+      return '<tr>' + head + gainCell +
         cell(formatEng(st.fn, 5) + 'Hz') +
         (st.q == null ? blank : cell(st.q.toPrecision(4))) +
         cell(p.db.toFixed(2) + ' dB') +
@@ -1806,7 +1863,9 @@
     const part = el.dataset.part;
     const where = row === 'Real' ? 'the real-pole section' : 'Section ' + row;
     if (part === 'gain') {
-      const now = solved.parts ? `The current gain of this stage is ${gainText(solved.gainActual)} V/V. ` : '';
+      const now = gainOff(solved)
+        ? `Realised gain is ${gainText(solved.gainActual)} (rounded parts); typed ${plain(typedGain(solved))}. `
+        : solved.parts ? `The current gain of this stage is ${gainText(solved.gainActual)} V/V. ` : '';
       return `${now}You may enter a new value, or clear the box for the default.\n\n${gainHint(solved.stage)}`;
     }
     const name = part.toUpperCase();
@@ -1898,7 +1957,7 @@
   function commit(next, el, notice) {
     const candidate = FH.state.normalize(next);
     const failed = solveAll(candidate).find(s => s.error);
-    if (failed && el) { refuse(el, failed.error); return; }
+    if (failed && el) { refuse(el, `${stageCaption(failed.stage)}: ${failed.error}`); return; }
     document.querySelectorAll('#app .refused').forEach(x => x.classList.remove('refused'));
     state = candidate;
     syncControls();
@@ -1907,6 +1966,9 @@
     if (notice) setHelp(notice);
     else showContextHelp();
   }
+
+  // "Section B" or "Real pole": names the stage a refusal came from.
+  const stageCaption = st => (st.kind === 'real' ? 'Real pole' : 'Section ' + st.label);
 
   // Refuse a typed value: say why (with the bound), put the old value back,
   // and keep the cursor in the box so it can be fixed.
@@ -2013,6 +2075,8 @@
   // Typing a new URL hash (or pasting a link) loads that state.
   window.addEventListener('hashchange', () => {
     state = FH.state.decodeHash(location.hash);
+    document.querySelectorAll('#app .refused').forEach(x => x.classList.remove('refused'));
+    refusalShowing = false; // a refusal from before the load no longer applies
     syncControls();
     recompute();
     showContextHelp();

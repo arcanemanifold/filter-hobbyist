@@ -185,3 +185,22 @@ test('SK refuses gain below 1', () => {
     assert.strictEqual(r.error, `Sallen-Key gain must be ≥ 1 (got ${gain})`);
   }
 });
+
+// ---- A computed partner cap over 1uF (review I2) -----------------------------
+
+test('an entered cap that forces its partner above 1uF is refused with the bound', () => {
+  const b = byLabel(lp(4), 'B'); // Q = 1.31: MFB C2/C1 ≥ 13.7, SK C1/C2 ≥ 6.83
+  assert.strictEqual(solve(b, 'mfb', { c1: 100e-9 }).error,
+    'C1 = 100n needs C2 ≥ 1.37u, above the 1uF limit; use a smaller C1');
+  assert.strictEqual(solve(b, 'sk', { c2: 470e-9 }).error,
+    'C2 = 470n needs C1 ≥ 3.21u, above the 1uF limit; use a smaller C2');
+});
+
+test('the default partner settles for 1uF when that still meets the ratio', () => {
+  // 68n · 13.7 = 0.93u fits under 1uF, but the 1.5x default aim (1.4u) does not.
+  const b = byLabel(lp(4), 'B');
+  const r = solve(b, 'mfb', { c1: 68e-9 });
+  assert.strictEqual(r.error, null, r.error);
+  assert.strictEqual(r.parts.C1, 68e-9);
+  assert.strictEqual(r.parts.C2, 1e-6);
+});

@@ -16,6 +16,12 @@ test('parseEng accepts engineering forms', () => {
   assert.strictEqual(parseEng('   '), null);
 });
 
+test("parseEng: 'G' is giga, like 'M' is mega", () => {
+  close(parseEng('1G'), 1e9);
+  close(parseEng('1GHz'), 1e9);
+  close(parseEng('2.5G'), 2.5e9);
+});
+
 test('parseEng rejects garbage', () => {
   for (const s of ['n', '4.7.1k', '-10n', '0', 'abc']) {
     assert.ok(Number.isNaN(parseEng(s)), s);

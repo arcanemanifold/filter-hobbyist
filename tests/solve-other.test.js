@@ -231,3 +231,67 @@ test('table phase omits the inversion of MFB HP, BP and notch', () => {
   const rn = solve(n, 'mfb', {}, EXACT);
   assert.ok(Math.abs(R.point([rn], 10, null).deg) < 1, 'notch ~0° in the passband');
 });
+
+// ---- MFB HP: typed gain vs C1/C3 (review I1) ---------------------------------
+
+test('MFB HP refuses a typed gain that entered C1 and C3 contradict', () => {
+  const a = byLabel(build(state({ entries: { A: { gain: 2 } } })), 'A');
+  const r = solve(a, 'mfb', { c1: 15e-9, c3: 10e-9, gain: 2 });
+  assert.strictEqual(r.parts, null);
+  assert.strictEqual(r.error, 'C1/C3 sets gain = 1.50; clear Gain or change C1/C3');
+  // Within 1% of the typed gain: accepted, caps kept as typed.
+  const ok = solve(a, 'mfb', { c1: 20e-9, c3: 10e-9, gain: 2 });
+  assert.strictEqual(ok.error, null, ok.error);
+  assert.deepStrictEqual([ok.parts.C1, ok.parts.C3], [20e-9, 10e-9]);
+  // Gain left blank: C1/C3 simply sets the gain.
+  const blank = solve(byLabel(build(state()), 'A'), 'mfb', { c1: 15e-9, c3: 10e-9 });
+  assert.strictEqual(blank.error, null, blank.error);
+  assertClose(blank.gainActual, 1.5, 1e-12, 'gain = C1/C3');
+});
+
+test('MFB HP default C3 is the series value whose C1/C3 is closest to the gain', () => {
+  const series = FH.units.SERIES.E12;
+  for (const G of [0.7, 1.5, 2, 3, 5, 10]) {
+    const a = byLabel(build(state({ entries: { A: { gain: G } } })), 'A');
+    const r = solve(a, 'mfb', { gain: G });
+    assert.strictEqual(r.error, null, r.error);
+    // Every E12 value from 1p to 1u: none gives a gain closer (on a log scale).
+    const err = c3 => Math.abs(Math.log(r.parts.C1 / c3 / G));
+    for (let d = -12; d <= -7; d++) {
+      for (const m of series) {
+        const c3 = Number(m + 'e' + d);
+        assert.ok(err(r.parts.C3) <= err(c3) + 1e-12, `G ${G}: C3 ${r.parts.C3} vs ${c3}`);
+      }
+    }
+  }
+});
+
+test('gainDiffers flags more than 1% only, and ignores a blank gain', () => {
+  const { gainDiffers } = FH.solve;
+  assert.strictEqual(gainDiffers(2, 1.829), true);
+  assert.strictEqual(gainDiffers(2, 2.015), false);
+  assert.strictEqual(gainDiffers(null, 1.5), false);
+});
+
+// ---- Computed caps over 1uF (review I2) --------------------------------------
+
+test('MFB HP: C3 over 1uF names C1, the gain and the bound', () => {
+  const a = byLabel(build(state({ fc: 1, entries: { A: { gain: 0.5 } } })), 'A');
+  const r = solve(a, 'mfb', { c1: 1e-6, gain: 0.5 });
+  assert.strictEqual(r.error,
+    'C1 = 1.00u at gain 0.5 needs C3 = 2.00u, above the 1uF limit; use a smaller C1 or a gain ≥ 1.00');
+});
+
+test('MFB HP defaults stay at or under 1uF for gain < 1 at low fn', () => {
+  for (const capSeries of ['E6', 'E12', 'E24']) {
+    for (const G of [0.3, 0.5, 0.75, 0.9]) {
+      for (const st of build(state({ fc: 1, poles: 5, entries: { A: { gain: G }, B: { gain: G } } }))) {
+        const r = solve(st, 'mfb', {}, { capSeries });
+        assert.strictEqual(r.error, null, `${capSeries} G ${G} ${st.label}: ${r.error}`);
+        for (const [name, v] of Object.entries(r.parts)) {
+          if (name[0] === 'C') assert.ok(v <= 1e-6, `${capSeries} G ${G} ${name} ${v}`);
+        }
+      }
+    }
+  }
+});
