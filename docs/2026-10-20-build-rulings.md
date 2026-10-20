@@ -23,10 +23,10 @@ Each line gives what was decided, why, and what it costs if it's wrong. Recorded
 - Ruling: Totals Q blank in all modes (controller, at dispatch) — cost: FilterPro showed a Totals Q; can add later.
 - Ruling: Task 10 GBW visibility check moved to fc 20–30 kHz (at 1 kHz with 1 MHz GBW the effect is ~0.04 dB, physically correct) — cost: none.
 - Ruling: Task 12 step 1 (five FilterPro screenshot checks) deferred to John at finish — needs his CrossOver time; provisional choices stay behind their constants — cost: Chebyshev norm/gain ref, Bessel norm, HP/notch parts, SK unity root may change after checks.
-- Ruling: I1 fix = refuse when entered C1/C3 conflict with a typed gain (message states the realised C1/C3 ratio); defaults pick the series C3 closest to C1/G; when realised gain differs from typed by >1%, mark the Passband Gain cell and say so in help — keeps "never silently changed" — cost: extra UI marker.
-- Ruling: final fix — MFB HP C3 entered alone (C1 default) is not refused; deviation is marked with "*" instead — cost: John may want a refusal there.
+- Ruling: I1 fix = refuse when entered C1/C3 (now C1/C2 under FilterPro labels) conflict with a typed gain (message states the realised C1/C3 ratio); defaults pick the series C3 (now C2) closest to C1/G; when realised gain differs from typed by >1%, mark the Passband Gain cell and say so in help — keeps "never silently changed" — cost: extra UI marker.
+- Ruling: final fix — MFB HP C3 (now C2 under FilterPro labels) entered alone (C1 default) is not refused; deviation is marked with "*" instead — cost: John may want a refusal there.
 - Ruling: final fix — default caps slide to keep partner caps ≤ 1u (MFB HP G<1 low fn; computed partner settles for 1u when ratio still met) — defaults only, entries untouched — cost: low-fc defaults differ.
-- Final fix: parked (minor) — MFB HP with only C2 entered names C1 in the C3-over-1u refusal — Ruling: bound still stated; wording fix later.
+- Final fix: parked (minor) — MFB HP with only C2 entered names C1 in the C3-over-1u refusal (C3 is now C2 under FilterPro labels) — Ruling: bound still stated; wording fix later. MOOT after round 2: the labels were renumbered, so this wording no longer applies.
 - Final fix: parked (minor) — stage prefix also on the stage's own cell refusals — Ruling: harmless.
 
 ## Round 2 (FilterPro screenshots of 2026-10-20)
@@ -43,3 +43,4 @@ Each line gives what was decided, why, and what it costs if it's wrong. Recorded
 - Ruling: notch "Poles" is the section count 1–5, labelled "Sections" like BP; sections are identical Fliege stages chained; Gain column disabled; each section gets one normal schematic cell captioned "Section A…" — cost: none.
 - Ruling: known, unresolved — SK required GBP at unity gain: FilterPro shows 100k (Q 0.5412) and 223k (Q 1.3066) at 1 kHz; our 206·G·Q^1.5·fn rule gives 82k and 308k; formula left unchanged, data points recorded in requiredGBP's comment — cost: Req. GBP column reads low/high vs FilterPro for SK.
 - Ruling: Totals Q shown in every mode (supersedes "Totals Q blank") — LP/HP = product of the pair target Qs (matches FilterPro 2.7922 / 0.4204 / 0.7071); BP/notch = measured centre ÷ −3 dB bandwidth on the rounded-part cascade, not tuned to FilterPro: ours 10.01 (notch 1×Q10 E96) and 23.04 (BP 4×Q10) vs FilterPro 9.81 and 23.97, whose definition is unknown (controller ruling) — cost: BP/notch Totals Q differs from FilterPro by 2–4 %.
+- Ruling: saved links from before round 2 that hold SK or MFB HP cap entries, or notch gain/poles, now map to the FilterPro-labelled parts (the old feedback cap C3 is C2; C3 is the series cap); notch gain is dropped — accepted, since there are no shipped users yet — cost: an old link may land values in the other cap column.
