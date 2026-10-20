@@ -234,5 +234,47 @@
   window.FH.poles = { prototype, CHEBY_NORM };
 })();
 </script>
+<script data-module="stages">
+(function () {
+  const PAIR_LABELS = ['A', 'B', 'C', 'D', 'E'];
+
+  // Build the list of stage targets (label, role, kind, fn, q, gain) for a state.
+  // Reads: passband, response, poles, fc, rippleDb, bpQ, entries.
+  function build(s) {
+    const entries = s.entries || {};
+    // A typed gain wins; otherwise the default.
+    const gainFor = (label, dflt) => {
+      const e = entries[label];
+      return e && typeof e.gain === 'number' ? e.gain : dflt;
+    };
+    const stages = [];
+
+    if (s.passband === 'bp' || s.passband === 'notch') {
+      const count = s.passband === 'notch' ? 1 : Math.min(s.poles, PAIR_LABELS.length);
+      for (let i = 0; i < count; i++) {
+        const label = PAIR_LABELS[i];
+        const dflt = s.passband === 'bp' ? s.bpQ : 1;
+        stages.push({ label, role: s.passband, kind: 'pair', fn: s.fc, q: s.bpQ, gain: gainFor(label, dflt) });
+      }
+      return stages;
+    }
+
+    // LP / HP: real pole first (if any), then pairs A, B, ... in prototype order.
+    let pairIndex = 0;
+    for (const p of window.FH.poles.prototype(s.response, s.poles, s.rippleDb)) {
+      const fn = s.passband === 'hp' ? s.fc / p.wn : s.fc * p.wn;
+      if (p.kind === 'real') {
+        stages.push({ label: 'Real', role: s.passband, kind: 'real', fn, q: null, gain: 1 });
+      } else {
+        const label = PAIR_LABELS[pairIndex++];
+        stages.push({ label, role: s.passband, kind: 'pair', fn, q: p.q, gain: gainFor(label, 1) });
+      }
+    }
+    return stages;
+  }
+
+  window.FH.stages = { build };
+})();
+</script>
 </body>
 </html>
