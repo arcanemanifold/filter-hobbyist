@@ -197,3 +197,45 @@ test('sweep is log-spaced with phase unwrapped', () => {
   assert.ok(pts[399].deg < -400, `ends at ${pts[399].deg}`);
   assert.ok(Object.keys(pts[0]).join() === 'f,db,deg,gdSec');
 });
+
+// ---- Round 2: Totals Q --------------------------------------------------------
+// LP/HP: product of the pair stages' target Qs. BP/notch: measured from the
+// cascade with rounded parts (centre ÷ −3 dB bandwidth).
+const solveAll = (st, circuit, o = {}) =>
+  FH.stages.build(st).map(s => FH.solve.stage(s, circuit, {}, opts(o)));
+const base4 = { poles: 4, fc: 1000, rippleDb: 1, bpQ: 10, entries: {} };
+
+test('totalsQ: LP/HP is the product of the pair Qs (FilterPro examples)', () => {
+  const cheby = solveAll(Object.assign({ passband: 'lp', response: 'chebyshev' }, base4), 'mfb');
+  assert.strictEqual(R.totalsQ(cheby, 'lp').toFixed(4), '2.7922');
+  const bessel = solveAll(Object.assign({ passband: 'lp', response: 'bessel' }, base4), 'mfb');
+  assert.strictEqual(R.totalsQ(bessel, 'lp').toFixed(4), '0.4204');
+  const butter = solveAll(Object.assign({ passband: 'hp', response: 'butterworth' }, base4), 'sk');
+  assert.strictEqual(R.totalsQ(butter, 'hp').toFixed(4), '0.7071');
+  // Real pole only: no pairs, no Q.
+  const one = solveAll(Object.assign({ passband: 'lp', response: 'butterworth' }, base4, { poles: 1 }), 'mfb');
+  assert.strictEqual(R.totalsQ(one, 'lp'), null);
+});
+
+// Measured Q, not tuned to FilterPro. FilterPro shows 9.81 (notch 1 × Q10,
+// E96) and 23.97 (BP 4 × Q10); its definition is unknown. Ours: the measured
+// centre ÷ −3 dB bandwidth (notch: also = R1/(2R) = 68.1k/6.80k = 10.01).
+test('totalsQ: notch 1 × Q10 with E96/E6 parts measures 10.01 (FilterPro shows 9.81)', () => {
+  const list = solveAll(Object.assign({ passband: 'notch', response: 'butterworth' }, base4, { poles: 1 }), 'mfb',
+    { capSeries: 'E6' });
+  const q = R.totalsQ(list, 'notch');
+  assert.ok(Math.abs(q - 10.01) <= 0.05, `notch Q ${q}`);
+});
+
+test('totalsQ: BP 4 × Q10 with E96/E12 parts measures 23.04 (FilterPro shows 23.97)', () => {
+  const list = solveAll(Object.assign({ passband: 'bp', response: 'butterworth' }, base4), 'mfb');
+  const q = R.totalsQ(list, 'bp');
+  assert.ok(Math.abs(q - 23.04) <= 0.1, `bp Q ${q}`);
+});
+
+test('totalsQ: one exact band-pass section measures its own Q', () => {
+  const list = solveAll(Object.assign({ passband: 'bp', response: 'butterworth' }, base4, { poles: 1 }), 'mfb',
+    { resSeries: 'Exact' });
+  const q = R.totalsQ(list, 'bp');
+  assert.ok(Math.abs(q / 10 - 1) < 0.01, `bp Q ${q}`);
+});

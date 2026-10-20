@@ -1187,7 +1187,45 @@
     return null;
   }
 
-  window.FH.response = { stageH, cascadeH, point, sweep, requiredGBP, NETLISTS };
+  // Bisection for the f in [lo, hi] where test(f) flips from true to false
+  // (log-spaced midpoint, so it works the same at 1 Hz and 1 MHz).
+  function bisectLog(test, lo, hi) {
+    for (let i = 0; i < 100; i++) {
+      const mid = Math.sqrt(lo * hi);
+      if (test(mid)) lo = mid; else hi = mid;
+    }
+    return Math.sqrt(lo * hi);
+  }
+
+  // The Q shown in the Totals row (FilterPro's convention).
+  //   LP / HP:     product of the pair stages' target Qs (real pole skipped);
+  //                null when there are no pairs.
+  //   BP / notch:  the overall Q measured on the cascade with the rounded
+  //                parts: Q = f0 / (f2 − f1), where f0 is the peak (BP) or
+  //                null (notch) and f1, f2 are the −3 dB points relative to
+  //                the peak (BP) or to the passband gain (notch, read at
+  //                f0/1000). f0 is found by bisection on the slope of |H|,
+  //                f1 and f2 by bisection on |H| against the −3 dB level.
+  function totalsQ(list, passband) {
+    if (!list.length) return null;
+    if (passband === 'lp' || passband === 'hp') {
+      const qs = list.filter(s => s.stage.kind === 'pair').map(s => s.stage.q);
+      return qs.length ? qs.reduce((a, q) => a * q, 1) : null;
+    }
+    const fc = list[0].stage.fn;
+    const m = f => mag(cascadeH(list, f, null));
+    const notch = passband === 'notch';
+    // Below f0, |H| rises toward a BP peak and falls toward a notch null.
+    const belowF0 = f => (m(f * 1.0001) > m(f / 1.0001)) !== notch;
+    const f0 = bisectLog(belowF0, fc / 2, fc * 2);
+    const level = (notch ? m(f0 / 1000) : m(f0)) / Math.SQRT2;
+    const outside = f => (m(f) < level) !== notch;          // in the −3 dB skirt
+    const f1 = bisectLog(f => outside(f), fc / 100, f0);
+    const f2 = bisectLog(f => !outside(f), f0, fc * 100);
+    return f0 / (f2 - f1);
+  }
+
+  window.FH.response = { stageH, cascadeH, point, sweep, requiredGBP, totalsQ, NETLISTS };
 })();
 </script>
 <script data-module="state">
@@ -1367,7 +1405,7 @@
   //                  includes its own passband gain. Phase leaves out the
   //                  180° of inverting stages (see the red note).
   //   Req. GBP       rule-of-thumb op amp GBP; blank for band-pass and notch
-  // Totals: product of the gains, cascade dB and degrees. Totals Q is blank.
+  // Totals: product of the gains, Q (FH.response.totalsQ), cascade dB and degrees.
   function renderTable(solvedList) {
     const cursor = state.cursor;
     const cell = text => `<td class="val">${esc(text)}</td>`;
@@ -1396,8 +1434,10 @@
     const ok = solvedList.length > 0 && solvedList.every(s => !s.error);
     if (ok) {
       const t = FH.response.point(solvedList, cursor, null);
+      const q = FH.response.totalsQ(solvedList, state.passband);
       totals = '<tr class="totals"><td></td>' + cell(totalGain(solvedList).toPrecision(3)) + '<td>Totals</td>' +
-        blank + cell(t.db.toFixed(2) + ' dB') + cell(t.deg.toFixed(1) + '°') + '<td></td></tr>';
+        (q == null ? blank : cell(q.toPrecision(4))) +
+        cell(t.db.toFixed(2) + ' dB') + cell(t.deg.toFixed(1) + '°') + '<td></td></tr>';
     }
 
     $('results').innerHTML =
