@@ -4,9 +4,204 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Filter Hobbyist</title>
+<style>
+  /* Classic grey-panel look, fixed 880×560 window like the original.
+     Every control is absolutely positioned; coordinates follow the decoded
+     VB6 form (twips ÷ 15 = px), adjusted where the original clipped. */
+  :root {
+    --panel: #d8d8d8;      /* window / frame grey */
+    --hilite: #ffffff;     /* bevel light edge */
+    --shadow: #808080;     /* bevel dark edge */
+    --dark: #404040;       /* inner dark edge of sunken boxes */
+    --ink: #000000;
+    --disabled: #8a8a8a;
+    --refuse: #c00000;
+  }
+  html, body { margin: 0; background: #bdbdbd; }
+  body { font: 12px Arial, Helvetica, sans-serif; color: var(--ink); }
+  #app {
+    position: relative; width: 880px; height: 560px; margin: 8px auto;
+    background: var(--panel); overflow: hidden;
+    box-shadow: 0 0 0 1px var(--shadow);
+  }
+  #app .abs { position: absolute; }
+
+  /* Grouped frame: grooved border with its caption sitting on the top edge. */
+  .frame {
+    position: absolute; box-sizing: border-box;
+    border: 2px groove var(--hilite);
+  }
+  .frame > .caption {
+    position: absolute; top: -8px; left: 6px; padding: 0 2px;
+    background: var(--panel); line-height: 14px; white-space: nowrap;
+  }
+  .frame > * { position: absolute; }
+
+  /* Sunken white entry boxes and dropdowns. */
+  input[type=text], select {
+    box-sizing: border-box; height: 21px; margin: 0;
+    font: 12px Arial, Helvetica, sans-serif; color: var(--ink);
+    background: #fff; border: 1px solid; border-radius: 0;
+    border-color: var(--shadow) var(--hilite) var(--hilite) var(--shadow);
+    box-shadow: inset 1px 1px 0 var(--dark);
+  }
+  input[type=text] { padding: 1px 4px 0; }
+  /* Dropdowns drawn the classic way (grey arrow button) so their width is the
+     same in every browser: text + 3px + 18px arrow + borders. */
+  select {
+    -webkit-appearance: none; appearance: none; padding: 0 19px 0 3px;
+    background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='17'%3E%3Crect width='16' height='17' fill='%23d8d8d8'/%3E%3Cpath d='M0 16.5H15.5V0' stroke='%23404040' fill='none'/%3E%3Cpath d='M0.5 16V0.5H15' stroke='%23fff' fill='none'/%3E%3Cpath d='M4 7h8l-4 4z'/%3E%3C/svg%3E") no-repeat right 1px center;
+  }
+  select:disabled { background-color: var(--panel); }
+  input[type=text]:disabled, select:disabled {
+    background: var(--panel); color: var(--disabled);
+  }
+  input.refused { outline: 2px solid var(--refuse); outline-offset: -2px; }
+  .lbl { white-space: nowrap; line-height: 14px; }
+  .lbl.right { text-align: right; }
+  .hidden { display: none !important; }
+
+  /* Left column: title in place of a logo, then the context help box. */
+  #title {
+    left: 0; top: 0; width: 208px; height: 44px; box-sizing: border-box;
+    padding: 6px 8px; font: bold 22px Arial, Helvetica, sans-serif; color: #a00000;
+    white-space: nowrap;
+  }
+  #help {
+    left: 0; top: 46px; width: 208px; height: 244px; box-sizing: border-box;
+    padding: 3px 4px; background: #fff; overflow: auto; line-height: 14px;
+    border: 1px solid; border-color: var(--shadow) var(--hilite) var(--hilite) var(--shadow);
+    box-shadow: inset 1px 1px 0 var(--dark);
+  }
+  #help.refusal { color: var(--refuse); }
+  #graph { left: 212px; top: 0; width: 340px; height: 290px; }
+  #schematics { left: 0; top: 294px; width: 508px; height: 266px; overflow: hidden; }
+
+  /* Right column: Settings panel, then the results table. */
+  #settings { left: 554px; top: 7px; width: 322px; height: 290px; }
+  #results  { left: 512px; top: 300px; width: 364px; height: 180px; }
+  #summary  { left: 524px; top: 482px; width: 340px; height: 32px; text-align: center; line-height: 15px; }
+  #phase-note { left: 560px; top: 520px; width: 280px; color: #e00000; text-align: center; line-height: 15px; }
+
+  /* Optional Entry grid column headers are centred over their boxes. */
+  .colhead { width: 46px; text-align: center; }
+  .colhead.small { font-size: 11px; line-height: 11px; }
+  input[type=text].cell { height: 17px; padding: 0 3px; }
+</style>
 </head>
 <body>
-<div id="app"></div>
+<div id="app">
+  <div id="title" class="abs">Filter Hobbyist</div>
+  <div id="help" class="abs" aria-live="polite"></div>
+  <div id="graph" class="abs"></div>
+  <div id="schematics" class="abs"></div>
+
+  <!-- Settings panel. Inner positions are relative to each frame. -->
+  <div id="settings" class="frame"><span class="caption">Settings</span>
+
+    <div id="fr-passband" class="frame" style="left:4px; top:10px; width:140px; height:40px;">
+      <span class="caption">Passband</span>
+      <select id="passband" aria-label="Passband" style="left:5px; top:10px; width:128px;">
+        <option value="lp">Low-Pass</option>
+        <option value="hp">High-Pass</option>
+        <option value="bp">Band-Pass</option>
+        <option value="notch">Notch</option>
+      </select>
+    </div>
+
+    <div id="fr-circuit" class="frame" style="left:4px; top:58px; width:140px; height:40px;">
+      <span class="caption">Circuit Type</span>
+      <select id="circuit" aria-label="Circuit Type" style="left:5px; top:10px; width:128px;">
+        <option value="mfb">MFB Single-Ended</option>
+        <option value="sk">Sallen-Key</option>
+      </select>
+    </div>
+
+    <!-- One frame for every passband: Poles + Cutoff (LP/HP),
+         Sections + Q + Center (BP), Q + Center (Notch). -->
+    <div id="fr-band" class="frame" style="left:148px; top:10px; width:170px; height:88px;">
+      <span class="caption" id="band-caption">Low-Pass</span>
+      <span class="lbl" id="lbl-poles" style="left:8px; top:18px;">Poles</span>
+      <input type="text" id="poles" aria-label="Poles" style="left:62px; top:14px; width:34px;">
+      <span class="lbl" id="lbl-q" style="left:106px; top:18px;">Q</span>
+      <input type="text" id="bpQ" aria-label="Q" style="left:120px; top:14px; width:42px;">
+      <span class="lbl" id="lbl-fc" style="left:8px; top:52px;">Cutoff Freq.</span>
+      <input type="text" id="fc" aria-label="Cutoff or center frequency (Hz)" style="left:84px; top:48px; width:56px;">
+      <span class="lbl" style="left:144px; top:52px;">Hz</span>
+    </div>
+
+    <div id="fr-filter" class="frame" style="left:4px; top:106px; width:200px; height:40px;">
+      <span class="caption">Filter Type</span>
+      <select id="response" aria-label="Filter Type" style="left:5px; top:10px; width:100px;">
+        <option value="butterworth">Butterworth</option>
+        <option value="bessel">Bessel</option>
+        <option value="chebyshev">Chebyshev</option>
+      </select>
+      <span class="lbl" id="lbl-ripple" style="left:110px; top:14px;">Ripple</span>
+      <input type="text" id="rippleDb" aria-label="Ripple (dB)" style="left:148px; top:10px; width:32px;">
+      <span class="lbl" style="left:183px; top:14px;">dB</span>
+    </div>
+
+    <span class="lbl right" style="left:206px; top:110px; width:40px;">Cursor<br>Freq.</span>
+    <input type="text" id="cursor" aria-label="Cursor frequency (Hz)" style="left:248px; top:112px; width:50px;">
+    <span class="lbl" style="left:300px; top:116px;">Hz</span>
+
+    <div id="fr-components" class="frame" style="left:4px; top:222px; width:94px; height:60px;">
+      <span class="caption">Components</span>
+      <select id="resSeries" aria-label="Resistor series" style="left:4px; top:9px; width:56px;">
+        <option>Exact</option><option>E12</option><option>E24</option><option>E96</option>
+      </select>
+      <span class="lbl" style="left:63px; top:13px;">Res.</span>
+      <select id="capSeries" aria-label="Capacitor series" style="left:4px; top:32px; width:56px;">
+        <option>E6</option><option>E12</option><option>E24</option>
+      </select>
+      <span class="lbl" style="left:63px; top:36px;">Cap.</span>
+    </div>
+
+    <!-- Optional Entry grid: static markup only; Task 9 wires it. -->
+    <div id="fr-entry" class="frame" style="left:100px; top:152px; width:220px; height:134px;">
+      <span class="caption">Optional Entry</span>
+      <span class="lbl colhead" style="left:30px; top:8px;">C1</span>
+      <span class="lbl colhead" style="left:76px; top:8px;">C2</span>
+      <span class="lbl colhead" style="left:122px; top:8px;">C3</span>
+      <span class="lbl colhead small" style="left:168px; top:2px;">Gain<br>(V/V)</span>
+      <span class="lbl right" style="left:2px; top:26px; width:24px;">A</span>
+      <input type="text" class="cell" id="e-A-c1" aria-label="A C1" data-row="A" data-part="c1" style="left:30px; top:24px; width:46px;" disabled>
+      <input type="text" class="cell" id="e-A-c2" aria-label="A C2" data-row="A" data-part="c2" style="left:76px; top:24px; width:46px;" disabled>
+      <input type="text" class="cell" id="e-A-c3" aria-label="A C3" data-row="A" data-part="c3" style="left:122px; top:24px; width:46px;" disabled>
+      <input type="text" class="cell" id="e-A-gain" aria-label="A Gain" data-row="A" data-part="gain" style="left:168px; top:24px; width:46px;" disabled>
+      <span class="lbl right" style="left:2px; top:43px; width:24px;">B</span>
+      <input type="text" class="cell" id="e-B-c1" aria-label="B C1" data-row="B" data-part="c1" style="left:30px; top:41px; width:46px;" disabled>
+      <input type="text" class="cell" id="e-B-c2" aria-label="B C2" data-row="B" data-part="c2" style="left:76px; top:41px; width:46px;" disabled>
+      <input type="text" class="cell" id="e-B-c3" aria-label="B C3" data-row="B" data-part="c3" style="left:122px; top:41px; width:46px;" disabled>
+      <input type="text" class="cell" id="e-B-gain" aria-label="B Gain" data-row="B" data-part="gain" style="left:168px; top:41px; width:46px;" disabled>
+      <span class="lbl right" style="left:2px; top:60px; width:24px;">C</span>
+      <input type="text" class="cell" id="e-C-c1" aria-label="C C1" data-row="C" data-part="c1" style="left:30px; top:58px; width:46px;" disabled>
+      <input type="text" class="cell" id="e-C-c2" aria-label="C C2" data-row="C" data-part="c2" style="left:76px; top:58px; width:46px;" disabled>
+      <input type="text" class="cell" id="e-C-c3" aria-label="C C3" data-row="C" data-part="c3" style="left:122px; top:58px; width:46px;" disabled>
+      <input type="text" class="cell" id="e-C-gain" aria-label="C Gain" data-row="C" data-part="gain" style="left:168px; top:58px; width:46px;" disabled>
+      <span class="lbl right" style="left:2px; top:77px; width:24px;">D</span>
+      <input type="text" class="cell" id="e-D-c1" aria-label="D C1" data-row="D" data-part="c1" style="left:30px; top:75px; width:46px;" disabled>
+      <input type="text" class="cell" id="e-D-c2" aria-label="D C2" data-row="D" data-part="c2" style="left:76px; top:75px; width:46px;" disabled>
+      <input type="text" class="cell" id="e-D-c3" aria-label="D C3" data-row="D" data-part="c3" style="left:122px; top:75px; width:46px;" disabled>
+      <input type="text" class="cell" id="e-D-gain" aria-label="D Gain" data-row="D" data-part="gain" style="left:168px; top:75px; width:46px;" disabled>
+      <span class="lbl right" style="left:2px; top:94px; width:24px;">E</span>
+      <input type="text" class="cell" id="e-E-c1" aria-label="E C1" data-row="E" data-part="c1" style="left:30px; top:92px; width:46px;" disabled>
+      <input type="text" class="cell" id="e-E-c2" aria-label="E C2" data-row="E" data-part="c2" style="left:76px; top:92px; width:46px;" disabled>
+      <input type="text" class="cell" id="e-E-c3" aria-label="E C3" data-row="E" data-part="c3" style="left:122px; top:92px; width:46px;" disabled>
+      <input type="text" class="cell" id="e-E-gain" aria-label="E Gain" data-row="E" data-part="gain" style="left:168px; top:92px; width:46px;" disabled>
+      <span class="lbl right" style="left:0px; top:114px; width:26px;">Real</span>
+      <input type="text" class="cell" id="e-Real-c1" aria-label="Real C1" data-row="Real" data-part="c1" style="left:30px; top:112px; width:46px;" disabled>
+      <span class="lbl" style="left:92px; top:115px;">R1 Seed</span>
+      <input type="text" id="seed" aria-label="R1 Seed (ohm)" class="cell" style="left:142px; top:112px; width:44px;">
+      <span class="lbl" style="left:189px; top:115px;">Ohm</span>
+    </div>
+  </div>
+
+  <div id="results" class="abs"></div>
+  <div id="summary" class="abs"></div>
+  <div id="phase-note" class="abs">* Note: Phase response is not corrected 180° for inverting stages.</div>
+</div>
 <script>window.FH = {};</script>
 <script data-module="units">
 (function () {
@@ -1042,6 +1237,177 @@
   }
 
   window.FH.state = { defaults, normalize, encodeHash, decodeHash, initial, STORAGE_KEY };
+})();
+</script>
+<script data-module="ui">
+(function () {
+  // Everything that touches the page lives here. The node test harness skips
+  // this block, so the maths modules above stay testable without a browser.
+  const FH = window.FH;
+  const { parseEng, formatEng } = FH.units;
+  const $ = id => document.getElementById(id);
+
+  const PASSBAND_NAMES = { lp: 'Low-Pass', hp: 'High-Pass', bp: 'Band-Pass', notch: 'Notch' };
+
+  // The one live state. Every change goes through commit().
+  let state = FH.state.initial(location.hash, safeStorage());
+
+  function safeStorage() {
+    try { return window.localStorage; } catch (e) { return null; }
+  }
+
+  // ---- Render hooks (filled in by later tasks) --------------------------------
+  // solvedList: one FH.solve.stage() result per stage, in stage order.
+  function renderTable(solvedList) { /* Task 9: results table + summary */ }
+  function renderGraph(solvedList) { /* Task 10: gain / phase / delay plot */ }
+  function renderSchematics(solvedList) { /* Task 11: one SVG per stage */ }
+
+  // Context help box. A refusal is shown in red until the next message.
+  function setHelp(text, isRefusal) {
+    const box = $('help');
+    box.textContent = text || '';
+    box.classList.toggle('refusal', !!isRefusal);
+  }
+
+  // build -> solve each stage -> render. Also saves the state.
+  function recompute() {
+    const stages = FH.stages.build(state);
+    const opts = { resSeries: state.resSeries, capSeries: state.capSeries, seed: state.seed };
+    const solvedList = stages.map(st => FH.solve.stage(st, state.circuit, state.entries[st.label] || {}, opts));
+    FH.ui.renderTable(solvedList);
+    FH.ui.renderGraph(solvedList);
+    FH.ui.renderSchematics(solvedList);
+    save();
+    return solvedList;
+  }
+
+  // Write the URL hash (shareable link) and localStorage (last session).
+  // replaceState avoids one browser-history entry per keystroke.
+  function save() {
+    const hash = '#' + FH.state.encodeHash(state);
+    try { history.replaceState(null, '', hash); } catch (e) { location.hash = hash; }
+    try { window.localStorage.setItem(FH.state.STORAGE_KEY, JSON.stringify(state)); } catch (e) { /* storage blocked */ }
+  }
+
+  // ---- Settings panel ---------------------------------------------------------
+
+  // Show the state in the controls, and show/hide/enable per passband.
+  //   LP/HP:  Circuit Type, Poles + Cutoff, Filter Type (Ripple for Chebyshev only)
+  //   BP:     Sections + Q + Center Freq; no Circuit Type (MFB only), no Filter Type
+  //   Notch:  Q + Center Freq only
+  function syncControls() {
+    const pb = state.passband;
+    const band = pb === 'bp' || pb === 'notch';
+    $('passband').value = pb;
+    $('circuit').value = state.circuit;
+    $('response').value = state.response;
+    $('resSeries').value = state.resSeries;
+    $('capSeries').value = state.capSeries;
+
+    $('fr-circuit').classList.toggle('hidden', band);
+    $('fr-filter').classList.toggle('hidden', band);
+    $('band-caption').textContent = PASSBAND_NAMES[pb];
+    $('lbl-poles').textContent = pb === 'bp' ? 'Sections' : 'Poles';
+    $('lbl-poles').classList.toggle('hidden', pb === 'notch');
+    $('poles').classList.toggle('hidden', pb === 'notch');
+    $('lbl-q').classList.toggle('hidden', !band);
+    $('bpQ').classList.toggle('hidden', !band);
+    $('lbl-fc').textContent = band ? 'Center Freq.' : 'Cutoff Freq.';
+
+    const cheby = state.response === 'chebyshev';
+    $('rippleDb').disabled = !cheby;
+    $('lbl-ripple').style.color = cheby ? '' : 'var(--disabled)';
+
+    $('poles').value = String(state.poles);
+    $('bpQ').value = plain(state.bpQ);
+    $('fc').value = formatEng(state.fc, 4);
+    $('rippleDb').value = cheby ? plain(state.rippleDb) : '';
+    $('cursor').value = formatEng(state.cursor, 4);
+    $('seed').value = formatEng(state.seed, 3);
+  }
+
+  // 0.5 -> "0.5", 1 -> "1", 0.123456 -> "0.123"
+  const plain = x => String(Number(x.toPrecision(3)));
+
+  // Apply a change: normalize -> show it -> recompute (which saves).
+  function commit(next) {
+    document.querySelectorAll('#app .refused').forEach(el => el.classList.remove('refused'));
+    state = FH.state.normalize(next);
+    syncControls();
+    recompute();
+  }
+
+  // Refuse a typed value: say why (with the bound), put the old value back,
+  // and keep the cursor in the box so it can be fixed.
+  function refuse(el, message) {
+    setHelp(message, true);
+    syncControls();
+    el.classList.add('refused');
+    setTimeout(() => { el.focus(); el.select(); }, 0);
+  }
+
+  // Dropdowns: the value maps straight onto a state key.
+  ['circuit', 'response', 'resSeries', 'capSeries'].forEach(key => {
+    $(key).addEventListener('change', e => commit({ ...state, [key]: e.target.value }));
+  });
+
+  $('passband').addEventListener('change', e => {
+    const next = { ...state, passband: e.target.value };
+    if (next.passband === 'bp' && state.poles > 5) {
+      next.poles = 5;
+      setHelp('Band-Pass allows 1 to 5 sections, so Sections is now 5.');
+    }
+    commit(next);
+  });
+
+  // Text entries. Each parser returns { value } or { error } (the refusal text).
+  const positiveEng = (what, example) => text => {
+    const v = parseEng(text);
+    return v > 0 ? { value: v } : { error: `${what} must be above 0. Enter a value like ${example}.` };
+  };
+  const inRange = (what, lo, hi, wholeNumber) => text => {
+    const v = Number(String(text).trim());
+    const ok = String(text).trim() !== '' && isFinite(v) && v >= lo && v <= hi && (!wholeNumber || Number.isInteger(v));
+    return ok ? { value: v } : { error: `${what} must be ${wholeNumber ? 'a whole number ' : ''}from ${lo} to ${hi}.` };
+  };
+
+  const TEXT_FIELDS = {
+    poles: () => (state.passband === 'bp' ? inRange('Sections', 1, 5, true) : inRange('Poles', 1, 10, true)),
+    bpQ: () => inRange('Q', 0.5, 100, false),
+    fc: () => positiveEng(state.passband === 'bp' || state.passband === 'notch' ? 'Center Freq.' : 'Cutoff Freq.', '1k or 2k2'),
+    rippleDb: () => inRange('Ripple (dB)', 0.01, 3, false),
+    cursor: () => positiveEng('Cursor Freq.', '10k or 2k2'),
+    seed: () => positiveEng('R1 Seed', '10k or 4k7'),
+  };
+
+  Object.keys(TEXT_FIELDS).forEach(key => {
+    const el = $(key);
+    const apply = () => {
+      el.classList.remove('refused');
+      const r = TEXT_FIELDS[key]()(el.value);
+      if (r.error) return refuse(el, r.error);
+      if (r.value === state[key]) { syncControls(); return; } // unchanged: just tidy the display
+      setHelp('');
+      commit({ ...state, [key]: r.value });
+    };
+    el.addEventListener('change', apply);                 // blur after an edit
+    el.addEventListener('keydown', e => { if (e.key === 'Enter') apply(); });
+  });
+
+  // Typing a new URL hash (or pasting a link) loads that state.
+  window.addEventListener('hashchange', () => {
+    state = FH.state.decodeHash(location.hash);
+    syncControls();
+    recompute();
+  });
+
+  FH.ui = {
+    recompute, renderTable, renderGraph, renderSchematics, setHelp,
+    getState: () => state,
+  };
+
+  syncControls();
+  recompute();
 })();
 </script>
 </body>
