@@ -28,3 +28,10 @@ Each line gives what was decided, why, and what it costs if it's wrong. Recorded
 - Ruling: final fix — default caps slide to keep partner caps ≤ 1u (MFB HP G<1 low fn; computed partner settles for 1u when ratio still met) — defaults only, entries untouched — cost: low-fc defaults differ.
 - Final fix: parked (minor) — MFB HP with only C2 entered names C1 in the C3-over-1u refusal — Ruling: bound still stated; wording fix later.
 - Final fix: parked (minor) — stage prefix also on the stage's own cell refusals — Ruling: harmless.
+
+## Round 2 (FilterPro screenshots of 2026-10-20)
+
+- Ruling: part labels now match FilterPro exactly (solver keys, netlists, schematics, Optional Entry C1/C2/C3, help, refusals) — SK LP C1 = ground / C2 = feedback; SK HP R1 = + input to ground / R2 = feedback; MFB HP C1 input, C2 feedback (gain = C1/C2), C3 series to − input, R1 feedback (− input to output), R2 shunt; real pole, MFB LP and MFB BP unchanged — cost: saved links with SK/MFB-HP cap entries now land in the other column.
+- Ruling: MFB HP wiring taken from FilterPro's drawing (C2 middle node → output, R1 − input → output); the round-2 brief's parentheticals had these two swapped, but its own "Gain = C1/C2" and the screenshot agree — cost: none if the screenshot is right.
+- Ruling: golden case 10 caps moved to c1 39n (gnd), c2 10n (fb) for the SK LP label swap, same expected resistors; SK refusal now reads "C2/C1 must be ≥ …" — cost: none.
+- Ruling: known, unresolved — MFB HP section B shunt R2: FilterPro 2.67k, ours 2.74k (exact 2706.9 sits 0.08 % above the E96 log midpoint 2704.7); test asserts ours — cost: one E96 step on that part if FilterPro's rounding rule is found.

@@ -675,9 +675,9 @@
   }
 
   // ---- Sallen-Key low-pass --------------------------------------------------
-  // R1 from the input to node X, R2 from X to the + input, C2 (Cg) from the
-  // + input to ground, C1 (Cf) from X to the output. Non-inverting gain
-  // K = 1 + R4/R3, with R3 (to ground) = the seed.
+  // FilterPro's labels: R1 from the input to node X, R2 from X to the + input,
+  // C1 (Cg) from the + input to ground, C2 (Cf) from X to the output
+  // (feedback). Non-inverting gain K = 1 + R4/R3, with R3 (to ground) = the seed.
   //   a = R1·R2·Cf·Cg               = 1/ω0²
   //   b = Cg·(R1+R2) + R1·Cf·(1−K)  = 1/(Q·ω0)
   // Substituting R2 = a/(R1·Cf·Cg) into b gives a quadratic in R1:
@@ -695,18 +695,19 @@
 
     let Cf, Cg;
     if (entry.c1 != null && entry.c2 != null) {
-      Cf = entry.c1; Cg = entry.c2;
+      Cg = entry.c1; Cf = entry.c2;
     } else {
-      // Cf (C1) is the big cap, Cg (C2) the small one.
-      const pair = defaultCapPair(ctx, minRatio, entry.c1, entry.c2);
+      // Cf (C2, feedback) is the big cap, Cg (C1, to ground) the small one.
+      const pair = defaultCapPair(ctx, minRatio, entry.c2, entry.c1);
       Cf = pair.big; Cg = pair.small;
     }
+    const ratioMsg = `C2/C1 must be ≥ ${minRatio.toFixed(2)} for Q = ${Q.toFixed(2)} at gain ${K}`;
     // Tiny tolerance so a ratio exactly at the bound isn't refused by float noise.
     if (Cf / Cg < minRatio * (1 - 1e-12)) {
-      if (entry.c1 == null && minRatio * Cg > MAX_CAP) {
-        return { error: partnerOverLimit('C2', Cg, 'C1', minRatio * Cg) };
+      if (entry.c2 == null && minRatio * Cg > MAX_CAP) {
+        return { error: partnerOverLimit('C1', Cg, 'C2', minRatio * Cg) };
       }
-      return { error: `C1/C2 must be ≥ ${minRatio.toFixed(2)} for Q = ${Q.toFixed(2)} at gain ${K}` };
+      return { error: ratioMsg };
     }
 
     const a = 1 / (w0 * w0);
@@ -721,9 +722,7 @@
       roots = [(b - s) / (2 * A), (b + s) / (2 * A)];
     }
     const positive = roots.filter(x => x > 0).sort((x, y) => x - y);
-    if (positive.length === 0) {
-      return { error: `C1/C2 must be ≥ ${minRatio.toFixed(2)} for Q = ${Q.toFixed(2)} at gain ${K}` };
-    }
+    if (positive.length === 0) return { error: ratioMsg };
     // One positive root (large K): that's it. Two (e.g. unity gain): FilterPro's
     // pick is unknown (spec check 5), so take the one with R1 ≤ R2.
     const r2For = r1 => a / (r1 * Cf * Cg);
@@ -733,7 +732,7 @@
     const R1 = ctx.roundR(R1exact);
     const R2 = ctx.roundR(a / (R1 * Cf * Cg));          // from the rounded R1
     const R3 = ctx.roundR(ctx.seed);
-    const parts = { R1, R2, R3, C1: Cf, C2: Cg };
+    const parts = { R1, R2, R3, C1: Cg, C2: Cf };
     let gainActual = 1;
     if (K > 1) {
       parts.R4 = ctx.roundR((K - 1) * R3);
@@ -756,64 +755,69 @@
   }
 
   // ---- MFB high-pass ----------------------------------------------------------
-  // C1 from the input to node X, R1 from X to ground, C3 from X to the output
-  // (gain-setting feedback), C2 from X to the inverting input, R2 from the
-  // inverting input to the output. + input grounded. (The low-pass with every
-  // R and C swapped.) With the inverting input at virtual ground:
-  //   H(s) = −(C1/C3) · s² / (s² + s·(C1+C2+C3)/(R2·C2·C3) + 1/(R1·R2·C2·C3))
+  // FilterPro's labels: C1 from the input to node X, R2 from X to ground
+  // (shunt), C2 from X to the output (gain-setting feedback), C3 from X to the
+  // inverting input (series), R1 from the inverting input to the output
+  // (feedback). + input grounded. (The low-pass with every R and C swapped.)
+  // With the inverting input at virtual ground:
+  //   H(s) = −(C1/C2) · s² / (s² + s·(C1+C2+C3)/(R1·C2·C3) + 1/(R1·R2·C2·C3))
   // so
-  //   gain G = C1/C3 (inverting, at high frequency)
+  //   gain G = C1/C2 (inverting, at high frequency)
   //   ω0²    = 1/(R1·R2·C2·C3)
-  //   ω0/Q   = (C1+C2+C3)/(R2·C2·C3)   →   R2 = Q·(C1+C2+C3)/(ω0·C2·C3)
+  //   ω0/Q   = (C1+C2+C3)/(R1·C2·C3)   →   R1 = Q·(C1+C2+C3)/(ω0·C2·C3)
   // Any Q is realizable: no cap ratio constraint.
-  // Default caps: C1 = C2 = round(C0), with C0 lowered for G < 1 so that
-  // C3 = C1/G stays at or under 1uF. C3 is the series value log-nearest to
-  // C1/G, i.e. the one whose C1/C3 is closest to G. (Both caps on the series
-  // means the gain can land a few % off; the table marks it.) R2 (sets Q) is
-  // rounded first; R1 (sets fn) is recomputed from the rounded R2.
-  // Entered C1 and C3 fix the gain, so a typed Gain that disagrees with
+  // Default caps: C1 = C3 = round(C0), with C0 lowered for G < 1 so that
+  // C2 = C1/G stays at or under 1uF. C2 is the series value log-nearest to
+  // C1/G, i.e. the one whose C1/C2 is closest to G. (Both caps on the series
+  // means the gain can land a few % off; the table marks it.) R1 (sets Q) is
+  // rounded first; R2 (sets fn) is recomputed from the rounded R1.
+  // Entered C1 and C2 fix the gain, so a typed Gain that disagrees with
   // them by more than 1% is refused rather than ignored.
   function solveMfbHighPass(ctx) {
     const { st, entry, w0 } = ctx;
     const Q = st.q, G = st.gain;
     if (!(G > 0)) return { error: `Gain must be > 0 (got ${G})` };
-    let { C1, C2 } = equalCaps(ctx, Math.min(ctx.c0, G * MAX_CAP));
+    // C1 and C3 are the equal pair: a typed one is kept, an empty one copies it.
+    const base = Math.min(ctx.c0, G * MAX_CAP);
+    let C1 = entry.c1 != null ? entry.c1 : entry.c3 != null ? entry.c3 : ctx.roundC(Math.min(base, MAX_CAP));
+    let C3 = entry.c3 != null ? entry.c3 : C1;
     // Rounding C1 up can still push C1/G past 1uF: step the default pair down.
-    if (entry.c1 == null && entry.c2 == null) {
+    if (entry.c1 == null && entry.c3 == null) {
       while (ctx.roundC(C1 / G) > MAX_CAP) {
         const next = stepSeries(C1, ctx.capSeries, -1);
         if (!(next < C1)) break;
-        C1 = C2 = next;
+        C1 = C3 = next;
       }
     }
-    if (entry.c1 != null && entry.c3 != null && gainDiffers(entry.gain, C1 / entry.c3)) {
-      return { error: `C1/C3 sets gain = ${(C1 / entry.c3).toFixed(2)}; clear Gain or change C1/C3` };
+    if (entry.c1 != null && entry.c2 != null && gainDiffers(entry.gain, C1 / entry.c2)) {
+      return { error: `C1/C2 sets gain = ${(C1 / entry.c2).toFixed(2)}; clear Gain or change C1/C2` };
     }
-    const C3 = entry.c3 != null ? entry.c3 : ctx.roundC(C1 / G);
-    if (C3 > MAX_CAP) {
-      return { error: `C1 = ${formatEng(C1)} at gain ${G} needs C3 = ${formatEng(C1 / G)}, above the 1uF limit; ` +
+    const C2 = entry.c2 != null ? entry.c2 : ctx.roundC(C1 / G);
+    if (C2 > MAX_CAP) {
+      return { error: `C1 = ${formatEng(C1)} at gain ${G} needs C2 = ${formatEng(C1 / G)}, above the 1uF limit; ` +
         `use a smaller C1 or a gain ≥ ${(C1 / MAX_CAP).toFixed(2)}` };
     }
-    const R2 = ctx.roundR(Q * (C1 + C2 + C3) / (w0 * C2 * C3));
-    const R1 = ctx.roundR(1 / (w0 * w0 * R2 * C2 * C3));
-    return { parts: { R1, R2, C1, C2, C3 }, gainActual: C1 / C3 };
+    const R1 = ctx.roundR(Q * (C1 + C2 + C3) / (w0 * C2 * C3));
+    const R2 = ctx.roundR(1 / (w0 * w0 * R1 * C2 * C3));
+    return { parts: { R1, R2, C1, C2, C3 }, gainActual: C1 / C2 };
   }
 
   // ---- Sallen-Key high-pass ---------------------------------------------------
-  // C1 from the input to node X, C2 from X to the + input, R1 from X to the
-  // output (feedback), R2 from the + input to ground. Non-inverting gain
-  // K = 1 + R4/R3, R3 (to ground) = the seed, as in the low-pass.
-  //   H(s) = K·s² / (s² + s·[(C1+C2)/(R2·C1·C2) + (1−K)/(R1·C1)] + 1/(R1·R2·C1·C2))
+  // FilterPro's labels: C1 from the input to node X, C2 from X to the + input,
+  // R2 from X to the output (feedback), R1 from the + input to ground (sets Q).
+  // Non-inverting gain K = 1 + R4/R3, R3 (to ground) = the seed, as in the
+  // low-pass. With Rf = R2 (feedback) and Rg = R1 (ground):
+  //   H(s) = K·s² / (s² + s·[(C1+C2)/(Rg·C1·C2) + (1−K)/(Rf·C1)] + 1/(Rf·Rg·C1·C2))
   // Multiplying the denominator through by a = 1/ω0²:
-  //   a = R1·R2·C1·C2                 = 1/ω0²
-  //   b = R1·(C1+C2) + R2·C2·(1−K)    = 1/(Q·ω0)
-  // Substituting R2 = a/(R1·C1·C2) into b gives a quadratic in R1:
-  //   (C1+C2)·R1² − b·R1 + a·(1−K)/C1 = 0
+  //   a = Rf·Rg·C1·C2                 = 1/ω0²
+  //   b = Rf·(C1+C2) + Rg·C2·(1−K)    = 1/(Q·ω0)
+  // Substituting Rg = a/(Rf·C1·C2) into b gives a quadratic in Rf:
+  //   (C1+C2)·Rf² − b·Rf + a·(1−K)/C1 = 0
   // For K ≥ 1 the constant term is ≤ 0, so there is always exactly one
-  // positive root (K = 1: R1 = b/(C1+C2); equal caps give R1 = 1/(2Q·ω0·C),
-  // R2 = 2Q/(ω0·C)). No cap ratio constraint.
-  // Default caps C1 = C2 = round(C0). R1 (from the Q quadratic) is rounded
-  // first and R2 recomputed from it so fn holds, as in the SK low-pass.
+  // positive root (K = 1: Rf = b/(C1+C2); equal caps give Rf = 1/(2Q·ω0·C),
+  // Rg = 2Q/(ω0·C)). No cap ratio constraint.
+  // Default caps C1 = C2 = round(C0). Rf (from the Q quadratic) is rounded
+  // first and Rg recomputed from it so fn holds, as in the SK low-pass.
   function solveSkHighPass(ctx) {
     const { st, w0 } = ctx;
     const Q = st.q, K = st.gain;
@@ -825,11 +829,11 @@
     const b = 1 / (Q * w0);
     const A = C1 + C2;
     const C = a * (1 - K) / C1;                             // ≤ 0 for K ≥ 1
-    const R1exact = (b + Math.sqrt(b * b - 4 * A * C)) / (2 * A);
-    const R1 = ctx.roundR(R1exact);
-    const R2 = ctx.roundR(a / (R1 * C1 * C2));              // from the rounded R1
+    const RfExact = (b + Math.sqrt(b * b - 4 * A * C)) / (2 * A);
+    const Rf = ctx.roundR(RfExact);
+    const Rg = ctx.roundR(a / (Rf * C1 * C2));              // from the rounded Rf
     const R3 = ctx.roundR(ctx.seed);
-    const parts = { R1, R2, R3, C1, C2 };
+    const parts = { R1: Rg, R2: Rf, R3, C1, C2 };
     let gainActual = 1;
     if (K > 1) {
       parts.R4 = ctx.roundR((K - 1) * R3);
@@ -933,9 +937,10 @@
   // for; the stage output is always 'out'. Shared names: in, n1, n2, out
   // (n3 for the SK gain divider and the notch summer, bp for the notch's
   // band-pass output).
-  // Part names follow the global convention: LP C1 = feedback, C2 = to ground;
-  // MFB HP C1 = input, C2 = series to the − input, C3 = feedback; SK HP
-  // C1 = input, C2 = second series cap.
+  // Part names are FilterPro's: MFB LP C1 = feedback, C2 = to ground;
+  // SK LP C1 = to ground, C2 = feedback; MFB HP C1 = input, C2 = feedback,
+  // C3 = series to the − input, R1 = feedback, R2 = shunt; SK HP C1 = input,
+  // C2 = second series cap, R1 = + input to ground, R2 = feedback.
   const NETLISTS = {
     // Real pole: R1 into n1, C1 from n1 to ground, unity buffer (− tied to out).
     'lp/real': p => ({
@@ -953,13 +958,13 @@
       opamp: { plus: 'gnd', minus: 'n2', out: 'out' },
       inverting: true,
     }),
-    // Sallen-Key low-pass: R1 in→n1, R2 n1→n2 (+ input), C1 n1→out (feedback),
-    // C2 n2→ground. With R4: − input at n3 = out·R3/(R3+R4) (R4 out→n3,
+    // Sallen-Key low-pass: R1 in→n1, R2 n1→n2 (+ input), C2 n1→out (feedback),
+    // C1 n2→ground. With R4: − input at n3 = out·R3/(R3+R4) (R4 out→n3,
     // R3 n3→ground), gain 1 + R4/R3. Without R4: unity buffer.
     'lp/sk': p => {
       const elements = [
         ['R', 'in', 'n1', p.R1], ['R', 'n1', 'n2', p.R2],
-        ['C', 'n1', 'out', p.C1], ['C', 'n2', 'gnd', p.C2],
+        ['C', 'n1', 'out', p.C2], ['C', 'n2', 'gnd', p.C1],
       ];
       let minus = 'out';
       if (p.R4 != null) {
@@ -974,22 +979,22 @@
       opamp: { plus: 'n1', minus: 'out', out: 'out' },
       inverting: false,
     }),
-    // MFB high-pass: C1 in→n1, R1 n1→ground, C3 n1→out (feedback),
-    // C2 n1→n2 (inverting input), R2 n2→out. + input grounded. Gain −C1/C3.
+    // MFB high-pass: C1 in→n1, R2 n1→ground, C2 n1→out (feedback),
+    // C3 n1→n2 (inverting input), R1 n2→out. + input grounded. Gain −C1/C2.
     'hp/mfb': p => ({
       elements: [
-        ['C', 'in', 'n1', p.C1], ['R', 'n1', 'gnd', p.R1], ['C', 'n1', 'out', p.C3],
-        ['C', 'n1', 'n2', p.C2], ['R', 'n2', 'out', p.R2],
+        ['C', 'in', 'n1', p.C1], ['R', 'n1', 'gnd', p.R2], ['C', 'n1', 'out', p.C2],
+        ['C', 'n1', 'n2', p.C3], ['R', 'n2', 'out', p.R1],
       ],
       opamp: { plus: 'gnd', minus: 'n2', out: 'out' },
       inverting: true,
     }),
-    // Sallen-Key high-pass: C1 in→n1, C2 n1→n2 (+ input), R1 n1→out
-    // (feedback), R2 n2→ground. Gain divider R4/R3 as in 'lp/sk'.
+    // Sallen-Key high-pass: C1 in→n1, C2 n1→n2 (+ input), R2 n1→out
+    // (feedback), R1 n2→ground. Gain divider R4/R3 as in 'lp/sk'.
     'hp/sk': p => {
       const elements = [
         ['C', 'in', 'n1', p.C1], ['C', 'n1', 'n2', p.C2],
-        ['R', 'n1', 'out', p.R1], ['R', 'n2', 'gnd', p.R2],
+        ['R', 'n1', 'out', p.R2], ['R', 'n2', 'gnd', p.R1],
       ];
       let minus = 'out';
       if (p.R4 != null) {
@@ -1508,8 +1513,8 @@
   // n1 -> out, shunt part n2 to ground. − input: tied to the output, or (when
   // R4 exists) the divider R4 out -> n3, R3 n3 -> ground, gain 1 + R4/R3.
   const SK_SLOTS = {
-    lp: { s1: 'R1', s2: 'R2', fb: 'C1', shunt: 'C2' },
-    hp: { s1: 'C1', s2: 'C2', fb: 'R1', shunt: 'R2' },
+    lp: { s1: 'R1', s2: 'R2', fb: 'C2', shunt: 'C1' },
+    hp: { s1: 'C1', s2: 'C2', fb: 'R2', shunt: 'R1' },
   };
   function drawSallenKey(p, s) {
     const y = 60, n1 = [44, y], n2 = [84, y], u = opamp(100, 68, true), outX = 148, n3 = [94, 100];
@@ -1539,7 +1544,7 @@
   // drawing and its output point.
   const MFB_SLOTS = {
     lp: { input: 'R1', shunt: 'C2', outer: 'R2', series: 'R3', inner: 'C1' },
-    hp: { input: 'C1', shunt: 'R1', outer: 'C3', series: 'C2', inner: 'R2' },
+    hp: { input: 'C1', shunt: 'R2', outer: 'C2', series: 'C3', inner: 'R1' },
     bp: { input: 'R1', shunt: 'R3', outer: 'C1', series: 'C2', inner: 'R2' },
   };
   function mfb(p, s, oy) {
@@ -1814,9 +1819,10 @@
     return pb === 'bp' || pb === 'notch' ? DESCRIPTIONS[pb] : DESCRIPTIONS[state.response];
   }
 
-  // What each capacitor does, by circuit. Naming follows the schematics:
-  //   LP (MFB and SK):  C1 = feedback, C2 = to ground
-  //   MFB HP:           C1 = input, C2 = series to the inverting input, C3 = feedback (gain = C1/C3)
+  // What each capacitor does, by circuit. Naming follows FilterPro's schematics:
+  //   MFB LP:           C1 = feedback, C2 = to ground
+  //   SK LP:            C1 = to ground (at the + input), C2 = feedback
+  //   MFB HP:           C1 = input, C2 = feedback (gain = C1/C2), C3 = series to the inverting input
   //   SK HP:            C1 = input, C2 = second series cap (to the + input)
   //   BP and notch:     C1 = feedback, C2 = to the inverting input
   //   Real pole:        C1 = to ground (LP) or series input cap (HP)
@@ -1825,10 +1831,12 @@
       return st.role === 'hp' ? 'the series input capacitor' : 'the capacitor to ground';
     }
     const roles = {
-      lp: { c1: 'the feedback capacitor', c2: 'the capacitor to ground' },
+      lp: state.circuit === 'mfb'
+        ? { c1: 'the feedback capacitor', c2: 'the capacitor to ground' }
+        : { c1: 'the capacitor to ground, at the + input', c2: 'the feedback capacitor' },
       hp: state.circuit === 'mfb'
-        ? { c1: 'the input capacitor', c2: 'the series capacitor to the inverting input',
-            c3: 'the feedback capacitor (gain = C1/C3)' }
+        ? { c1: 'the input capacitor', c2: 'the feedback capacitor (gain = C1/C2)',
+            c3: 'the series capacitor to the inverting input' }
         : { c1: 'the input capacitor', c2: 'the second series capacitor, to the + input' },
       bp: { c1: 'the feedback capacitor', c2: 'the capacitor to the inverting input' },
       notch: { c1: 'the band-pass feedback capacitor', c2: 'the band-pass capacitor to the inverting input' },
@@ -1840,7 +1848,7 @@
     if (st.role === 'notch') return 'Gain sets the passband gain of the notch\'s summing amplifier. Blank means 1.';
     if (st.role === 'bp') return 'Gain is the section\'s gain at the center frequency. Blank uses the default, equal to Q.';
     if (state.circuit === 'sk') return 'Gain is this stage\'s passband gain. Sallen-Key needs 1 or more. Blank means 1.';
-    if (st.role === 'hp') return 'Gain is this stage\'s passband gain, set by C1/C3. Blank means 1.';
+    if (st.role === 'hp') return 'Gain is this stage\'s passband gain, set by C1/C2. Blank means 1.';
     return 'Gain is this stage\'s passband gain. Blank means 1.';
   }
 

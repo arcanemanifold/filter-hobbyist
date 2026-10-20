@@ -49,7 +49,7 @@ const golden = {
   })(),
   10: (() => {
     const s = lp(5, { A: { gain: 10 }, B: { gain: 10 } });
-    const caps = { c1: 10e-9, c2: 39e-9 };
+    const caps = { c1: 39e-9, c2: 10e-9 }; // SK LP: C1 = gnd, C2 = fb (FilterPro labels)
     return { A: solve(byLabel(s, 'A'), 'sk', caps), B: solve(byLabel(s, 'B'), 'sk', caps) };
   })(),
 };
@@ -153,8 +153,8 @@ test('finite gbw raises SK peaking', () => {
 });
 
 // Independent check of the nodal solve: unity-gain SK with a buffer of gain
-// K = A/(1+A) has the closed form
-//   H = K / (1 − ω²·R1R2C1C2 + jω·(R1C2 + R2C2 + R1C1·(1 − K)))
+// K = A/(1+A) has the closed form (C1 = to ground, C2 = feedback)
+//   H = K / (1 − ω²·R1R2C1C2 + jω·(R1C1 + R2C1 + R1C2·(1 − K)))
 test('SK stageH with finite gbw matches the closed form', () => {
   const B = solve(byLabel(lp(4, {}, 10e3), 'B'), 'sk');
   const { R1, R2, C1, C2 } = B.parts;
@@ -164,7 +164,7 @@ test('SK stageH with finite gbw matches the closed form', () => {
     const A = { re: 0, im: -gbw / f };
     const d = { re: 1 + A.re, im: A.im }, dd = d.re * d.re + d.im * d.im;
     const K = { re: (A.re * d.re + A.im * d.im) / dd, im: (A.im * d.re - A.re * d.im) / dd };
-    const t = { re: R1 * C2 + R2 * C2 + R1 * C1 * (1 - K.re), im: -R1 * C1 * K.im };
+    const t = { re: R1 * C1 + R2 * C1 + R1 * C2 * (1 - K.re), im: -R1 * C2 * K.im };
     const den = { re: 1 - w * w * R1 * R2 * C1 * C2 - w * t.im, im: w * t.re };
     const want = 20 * Math.log10(Math.hypot(K.re, K.im) / Math.hypot(den.re, den.im));
     const h = R.stageH(B, f, gbw);
