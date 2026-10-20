@@ -284,8 +284,8 @@
 
   // Solve one stage's parts.
   //   stage:   { label, role, kind: 'real'|'pair', fn, q, gain } from FH.stages
-  //   circuit: 'mfb' | 'sk'
-  //   entry:   user caps { c1?, c2? } (farads), kept exactly as typed
+  //   circuit: 'mfb' | 'sk'   (band-pass: MFB only; notch: ignored)
+  //   entry:   user caps { c1?, c2?, c3? } (farads), kept exactly as typed
   //   opts:    { resSeries, capSeries, seed }  seed = R1 Seed in ohms
   // Returns { stage, circuit, parts, gainActual, error }. On a refusal parts is
   // null and error says why. Part values are rounded to their series
@@ -308,9 +308,15 @@
     }
 
     let out;
-    if (st.kind === 'real') out = solveRealPole(ctx);
-    else if (circuit === 'mfb') out = solveMfbLowPass(ctx);
-    else if (circuit === 'sk') out = solveSkLowPass(ctx);
+    const hp = st.role === 'hp';
+    if (st.role === 'notch') out = solveNotch(ctx);        // one fixed topology
+    else if (st.role === 'bp') {
+      if (circuit !== 'mfb') return fail('Band-pass is MFB only.');
+      out = solveMfbBandPass(ctx);
+    }
+    else if (st.kind === 'real') out = solveRealPole(ctx); // same R, C for LP and HP
+    else if (circuit === 'mfb') out = hp ? solveMfbHighPass(ctx) : solveMfbLowPass(ctx);
+    else if (circuit === 'sk') out = hp ? solveSkHighPass(ctx) : solveSkLowPass(ctx);
     else return fail(`Unknown circuit: ${circuit}`);
 
     if (out.error) return fail(out.error);
@@ -321,8 +327,10 @@
     return { stage: st, circuit, parts: out.parts, gainActual: out.gainActual, error: null };
   }
 
-  // ---- Real pole: R1 + C1 to ground, then a unity buffer --------------------
-  // fn = 1/(2π·R·C). Pick C (entered, or C0 rounded, capped at 1uF),
+  // ---- Real pole: one RC, then a unity buffer ----------------------------------
+  //   low-pass:  R1 in series, C1 to ground
+  //   high-pass: C1 in series, R1 to ground
+  // Either way fn = 1/(2π·R·C). Pick C (entered, or C0 rounded, capped at 1uF),
   // then solve R from it.
   function solveRealPole(ctx) {
     const C = ctx.entry.c1 != null ? ctx.entry.c1 : ctx.roundC(Math.min(ctx.c0, MAX_CAP));
@@ -493,6 +501,149 @@
     return { parts, gainActual };
   }
 
+  // ---- Default equal caps (HP, BP, notch) -----------------------------------
+  // These circuits use two equal caps by default. A cap the user typed is kept;
+  // an empty one takes the other's typed value, else round(base) (base capped
+  // at 1uF so very low fn still has a default; the resistors scale up).
+  function equalCaps(ctx, base) {
+    const { entry } = ctx;
+    const shared = entry.c1 != null ? entry.c1 : entry.c2 != null ? entry.c2 : ctx.roundC(Math.min(base, MAX_CAP));
+    return {
+      C1: entry.c1 != null ? entry.c1 : shared,
+      C2: entry.c2 != null ? entry.c2 : shared,
+    };
+  }
+
+  // ---- MFB high-pass ----------------------------------------------------------
+  // C1 from the input to node X, R1 from X to ground, C3 from X to the output
+  // (gain-setting feedback), C2 from X to the inverting input, R2 from the
+  // inverting input to the output. + input grounded. (The low-pass with every
+  // R and C swapped.) With the inverting input at virtual ground:
+  //   H(s) = −(C1/C3) · s² / (s² + s·(C1+C2+C3)/(R2·C2·C3) + 1/(R1·R2·C2·C3))
+  // so
+  //   gain G = C1/C3 (inverting, at high frequency)
+  //   ω0²    = 1/(R1·R2·C2·C3)
+  //   ω0/Q   = (C1+C2+C3)/(R2·C2·C3)   →   R2 = Q·(C1+C2+C3)/(ω0·C2·C3)
+  // Any Q is realizable: no cap ratio constraint.
+  // Default caps: C1 = C2 = round(C0), C3 = round(C1/G). R2 (sets Q) is
+  // rounded first; R1 (sets fn) is recomputed from the rounded R2.
+  function solveMfbHighPass(ctx) {
+    const { st, entry, w0 } = ctx;
+    const Q = st.q, G = st.gain;
+    if (!(G > 0)) return { error: `Gain must be > 0 (got ${G})` };
+    const { C1, C2 } = equalCaps(ctx, ctx.c0);
+    const C3 = entry.c3 != null ? entry.c3 : ctx.roundC(C1 / G);
+    const R2 = ctx.roundR(Q * (C1 + C2 + C3) / (w0 * C2 * C3));
+    const R1 = ctx.roundR(1 / (w0 * w0 * R2 * C2 * C3));
+    return { parts: { R1, R2, C1, C2, C3 }, gainActual: C1 / C3 };
+  }
+
+  // ---- Sallen-Key high-pass ---------------------------------------------------
+  // C1 from the input to node X, C2 from X to the + input, R1 from X to the
+  // output (feedback), R2 from the + input to ground. Non-inverting gain
+  // K = 1 + R4/R3, R3 (to ground) = the seed, as in the low-pass.
+  //   H(s) = K·s² / (s² + s·[(C1+C2)/(R2·C1·C2) + (1−K)/(R1·C1)] + 1/(R1·R2·C1·C2))
+  // Multiplying the denominator through by a = 1/ω0²:
+  //   a = R1·R2·C1·C2                 = 1/ω0²
+  //   b = R1·(C1+C2) + R2·C2·(1−K)    = 1/(Q·ω0)
+  // Substituting R2 = a/(R1·C1·C2) into b gives a quadratic in R1:
+  //   (C1+C2)·R1² − b·R1 + a·(1−K)/C1 = 0
+  // For K ≥ 1 the constant term is ≤ 0, so there is always exactly one
+  // positive root (K = 1: R1 = b/(C1+C2); equal caps give R1 = 1/(2Q·ω0·C),
+  // R2 = 2Q/(ω0·C)). No cap ratio constraint.
+  // Default caps C1 = C2 = round(C0). R1 (from the Q quadratic) is rounded
+  // first and R2 recomputed from it so fn holds, as in the SK low-pass.
+  function solveSkHighPass(ctx) {
+    const { st, w0 } = ctx;
+    const Q = st.q, K = st.gain;
+    if (!(K >= 1)) {
+      return { error: `Sallen-Key gain must be ≥ 1 (got ${K})` };
+    }
+    const { C1, C2 } = equalCaps(ctx, ctx.c0);
+    const a = 1 / (w0 * w0);
+    const b = 1 / (Q * w0);
+    const A = C1 + C2;
+    const C = a * (1 - K) / C1;                             // ≤ 0 for K ≥ 1
+    const R1exact = (b + Math.sqrt(b * b - 4 * A * C)) / (2 * A);
+    const R1 = ctx.roundR(R1exact);
+    const R2 = ctx.roundR(a / (R1 * C1 * C2));              // from the rounded R1
+    const R3 = ctx.roundR(ctx.seed);
+    const parts = { R1, R2, R3, C1, C2 };
+    let gainActual = 1;
+    if (K > 1) {
+      parts.R4 = ctx.roundR((K - 1) * R3);
+      gainActual = 1 + parts.R4 / R3;
+    }
+    return { parts, gainActual };
+  }
+
+  // FilterPro's default band-pass cap is about 1.7·C0 (27n at a 10k seed and
+  // 1 kHz, where C0 = 15.9n). Kept in one place; provisional (spec check 3).
+  const BP_CAP_FACTOR = 1.7;
+
+  // ---- MFB band-pass section (shared by band-pass and notch) -----------------
+  // R1 from the input to node X, R3 from X to ground, C1 from X to the output
+  // (feedback), C2 from X to the inverting input, R2 from the inverting input
+  // to the output (feedback). + input grounded.
+  //   H(s) = −(s/(R1·C1)) / (s² + s·(C1+C2)/(R2·C1·C2) + (1/R1 + 1/R3)/(R2·C1·C2))
+  // so
+  //   ω0/Q = (C1+C2)/(R2·C1·C2)            →  R2 = Q·(C1+C2)/(ω0·C1·C2)
+  //   centre gain G = R2·C2/(R1·(C1+C2))   →  R1 = R2·C2/(G·(C1+C2))
+  //                 (equal caps: G = R2/(2·R1))
+  //   ω0²  = (1/R1 + 1/R3)/(R2·C1·C2)      →  1/R3 = ω0²·R2·C1·C2 − 1/R1
+  // R3 > 0 needs ω0²·R2·C1·C2·R1 > 1, which works out to
+  //   G < Q²·(C1+C2)/C1                     (equal caps: G < 2·Q²)
+  // R2 (sets Q) is rounded first; R1 (gain) and then R3 (fn) are recomputed
+  // from the rounded values. The centre gain doesn't depend on R3.
+  // Returns { parts, gainActual } or { error, bound } (bound = max gain).
+  function mfbBandPassSection(ctx, G) {
+    const { st, w0 } = ctx;
+    const Q = st.q;
+    const { C1, C2 } = equalCaps(ctx, ctx.c0 * BP_CAP_FACTOR);
+    const bound = Q * Q * (C1 + C2) / C1;
+    const refuse = { error: `Band-pass gain must be < ${bound.toFixed(2)} for Q = ${Q.toFixed(2)}`, bound };
+    if (!(G > 0) || !(G < bound)) return refuse;
+    const R2 = ctx.roundR(Q * (C1 + C2) / (w0 * C1 * C2));
+    const R1 = ctx.roundR(R2 * C2 / (G * (C1 + C2)));
+    const g3 = w0 * w0 * R2 * C1 * C2 - 1 / R1;             // 1/R3
+    if (!(g3 > 0)) return refuse;                            // rounding pushed past the bound
+    const R3 = ctx.roundR(1 / g3);
+    return { parts: { R1, R2, R3, C1, C2 }, gainActual: R2 * C2 / (R1 * (C1 + C2)) };
+  }
+
+  // ---- MFB band-pass (inverting; gain is the centre-frequency gain) ----------
+  function solveMfbBandPass(ctx) {
+    return mfbBandPassSection(ctx, ctx.st.gain);
+  }
+
+  // ---- Notch -------------------------------------------------------------------
+  // One fixed topology: the MFB band-pass section above at centre gain 1, then
+  // an inverting summer that adds the input and the band-pass output:
+  //   R4 from the input to the summer's inverting input (node S),
+  //   R5 from the band-pass output to S, R6 from S to the output.
+  //   v_out = −R6·(v_in/R4 + v_bp/R5)
+  // The band-pass is v_bp = −v_in·(s·ω0/Q)/D(s), D = s² + s·ω0/Q + ω0², so
+  // with R4 = R5:
+  //   H(s) = −(R6/R4)·(D(s) − s·ω0/Q)/D(s) = −(R6/R4)·(s² + ω0²)/D(s)
+  // The notch depth depends on R4 = R5 and the band-pass gain being exactly 1.
+  // R4 = R5 = round(seed); R6 = round(G·seed) sets the passband gain (G = 1:
+  // all three equal). Provisional until spec check 4.
+  // Band-pass gain 1 needs 1 < Q²·(C1+C2)/C1, i.e. Q > 1/√2 for equal caps.
+  function solveNotch(ctx) {
+    const { st } = ctx;
+    const G = st.gain;
+    if (!(G > 0)) return { error: `Gain must be > 0 (got ${G})` };
+    const sec = mfbBandPassSection(ctx, 1);
+    if (sec.error) {
+      const { C1, C2 } = equalCaps(ctx, ctx.c0 * BP_CAP_FACTOR);
+      const qMin = Math.sqrt(C1 / (C1 + C2));
+      return { error: `Notch Q must be > ${qMin.toFixed(2)} (got ${st.q.toFixed(2)})` };
+    }
+    const R4 = ctx.roundR(ctx.seed);
+    const parts = Object.assign(sec.parts, { R4, R5: R4, R6: ctx.roundR(G * ctx.seed) });
+    return { parts, gainActual: parts.R6 / R4 };
+  }
+
   window.FH.solve = { stage, skMinRatio };
 })();
 </script>
@@ -515,10 +666,15 @@
   // One row per (role, kind/circuit). Each takes a stage's parts and returns
   //   elements: [type, nodeA, nodeB, value], type 'R' (ohms) or 'C' (farads)
   //   opamp:    { plus, minus, out }: a voltage source out = A·(v+ − v−)
-  //   inverting: true when the passband gain is negative (MFB)
+  //             (or opamps: [ ... ] for a two-op-amp stage; the notch)
+  //   inverting: true when the passband gain is negative (MFB, notch)
   // Nodes: 'in' is driven with 1 V, 'gnd' is 0 V, everything else is solved
-  // for. Shared names: in, n1, n2, out (n3 only for the SK gain divider).
-  // Part names follow the global convention: LP C1 = feedback, C2 = to ground.
+  // for; the stage output is always 'out'. Shared names: in, n1, n2, out
+  // (n3 for the SK gain divider and the notch summer, bp for the notch's
+  // band-pass output).
+  // Part names follow the global convention: LP C1 = feedback, C2 = to ground;
+  // MFB HP C1 = input, C2 = series to the − input, C3 = feedback; SK HP
+  // C1 = input, C2 = second series cap.
   const NETLISTS = {
     // Real pole: R1 into n1, C1 from n1 to ground, unity buffer (− tied to out).
     'lp/real': p => ({
@@ -551,11 +707,68 @@
       }
       return { elements, opamp: { plus: 'n2', minus, out: 'out' }, inverting: false };
     },
+    // Real-pole high-pass: C1 into n1, R1 from n1 to ground, unity buffer.
+    'hp/real': p => ({
+      elements: [['C', 'in', 'n1', p.C1], ['R', 'n1', 'gnd', p.R1]],
+      opamp: { plus: 'n1', minus: 'out', out: 'out' },
+      inverting: false,
+    }),
+    // MFB high-pass: C1 in→n1, R1 n1→ground, C3 n1→out (feedback),
+    // C2 n1→n2 (inverting input), R2 n2→out. + input grounded. Gain −C1/C3.
+    'hp/mfb': p => ({
+      elements: [
+        ['C', 'in', 'n1', p.C1], ['R', 'n1', 'gnd', p.R1], ['C', 'n1', 'out', p.C3],
+        ['C', 'n1', 'n2', p.C2], ['R', 'n2', 'out', p.R2],
+      ],
+      opamp: { plus: 'gnd', minus: 'n2', out: 'out' },
+      inverting: true,
+    }),
+    // Sallen-Key high-pass: C1 in→n1, C2 n1→n2 (+ input), R1 n1→out
+    // (feedback), R2 n2→ground. Gain divider R4/R3 as in 'lp/sk'.
+    'hp/sk': p => {
+      const elements = [
+        ['C', 'in', 'n1', p.C1], ['C', 'n1', 'n2', p.C2],
+        ['R', 'n1', 'out', p.R1], ['R', 'n2', 'gnd', p.R2],
+      ];
+      let minus = 'out';
+      if (p.R4 != null) {
+        elements.push(['R', 'out', 'n3', p.R4], ['R', 'n3', 'gnd', p.R3]);
+        minus = 'n3';
+      }
+      return { elements, opamp: { plus: 'n2', minus, out: 'out' }, inverting: false };
+    },
+    // MFB band-pass: R1 in→n1, R3 n1→ground, C1 n1→out (feedback),
+    // C2 n1→n2 (inverting input), R2 n2→out. + input grounded.
+    // Centre gain −R2·C2/(R1·(C1+C2)) (equal caps: −R2/(2·R1)).
+    'bp/mfb': p => ({
+      elements: [
+        ['R', 'in', 'n1', p.R1], ['R', 'n1', 'gnd', p.R3], ['C', 'n1', 'out', p.C1],
+        ['C', 'n1', 'n2', p.C2], ['R', 'n2', 'out', p.R2],
+      ],
+      opamp: { plus: 'gnd', minus: 'n2', out: 'out' },
+      inverting: true,
+    }),
+    // Notch: the MFB band-pass above with its output at 'bp', then an
+    // inverting summer: R4 in→n3, R5 bp→n3, R6 n3→out, + input grounded.
+    // Passband gain −R6/R4.
+    notch: p => ({
+      elements: [
+        ['R', 'in', 'n1', p.R1], ['R', 'n1', 'gnd', p.R3], ['C', 'n1', 'bp', p.C1],
+        ['C', 'n1', 'n2', p.C2], ['R', 'n2', 'bp', p.R2],
+        ['R', 'in', 'n3', p.R4], ['R', 'bp', 'n3', p.R5], ['R', 'n3', 'out', p.R6],
+      ],
+      opamps: [
+        { plus: 'gnd', minus: 'n2', out: 'bp' },
+        { plus: 'gnd', minus: 'n3', out: 'out' },
+      ],
+      inverting: true,
+    }),
   };
 
   function netlistFor(solved) {
     const st = solved.stage;
-    const key = `${st.role}/${st.kind === 'real' ? 'real' : solved.circuit}`;
+    // The notch has one fixed topology, whatever circuit is selected.
+    const key = st.role === 'notch' ? 'notch' : `${st.role}/${st.kind === 'real' ? 'real' : solved.circuit}`;
     const make = NETLISTS[key];
     if (!make) throw new Error(`No netlist for ${key}`);
     return make(solved.parts);
@@ -592,18 +805,20 @@
   }
 
   // H(j2πf) = v(out)/v(in) for one solved stage, by nodal analysis.
-  //   Every unknown node except the op amp output gets a KCL row:
+  //   Every unknown node except an op amp output gets a KCL row:
   //     Σ y·(v_node − v_other) = 0, with y = 1/R or jωC.
-  //   The output node's KCL would need the op amp's output current, which is
-  //   unknown, so that row is replaced by the op amp equation:
+  //   An op amp output node's KCL would need the op amp's output current,
+  //   which is unknown, so that row is replaced by the op amp equation:
   //     v_out − A·v+ + A·v− = 0
   //   v(in) = 1 moves to the right-hand side; ground drops out.
+  //   The stage output is node 'out'.
   function stageH(solved, f, gbw) {
     const net = netlistFor(solved);
+    const amps = net.opamps || [net.opamp];
     const w = 2 * Math.PI * f;
     const nodes = [];
     const ends = net.elements.map(([, a, b]) => [a, b]);
-    ends.push([net.opamp.out, net.opamp.plus, net.opamp.minus]);
+    for (const amp of amps) ends.push([amp.out, amp.plus, amp.minus]);
     for (const group of ends) {
       for (const n of group) if (n !== 'in' && n !== 'gnd' && !nodes.includes(n)) nodes.push(n);
     }
@@ -625,17 +840,18 @@
       }
     }
 
-    // Op amp row replaces the output node's KCL.
+    // Each op amp's row replaces its output node's KCL.
     const A = opampGain(f, gbw);
-    const o = idx[net.opamp.out];
-    for (let c = 0; c < N; c++) M[o][c] = cx(0);
-    rhs[o] = cx(0);
-    M[o][o] = cx(1);
-    const { plus, minus } = net.opamp;
-    if (plus in idx) M[o][idx[plus]] = sub(M[o][idx[plus]], A);
-    if (minus in idx) M[o][idx[minus]] = add(M[o][idx[minus]], A);
+    for (const { plus, minus, out } of amps) {
+      const o = idx[out];
+      for (let c = 0; c < N; c++) M[o][c] = cx(0);
+      rhs[o] = cx(0);
+      M[o][o] = cx(1);
+      if (plus in idx) M[o][idx[plus]] = sub(M[o][idx[plus]], A);
+      if (minus in idx) M[o][idx[minus]] = add(M[o][idx[minus]], A);
+    }
 
-    return solveLinear(M, rhs)[o];
+    return solveLinear(M, rhs)[idx.out];
   }
 
   // Product of the stages' responses (they are buffered, so they multiply).
@@ -643,9 +859,10 @@
     return list.reduce((h, s) => mul(h, stageH(s, f, gbw)), cx(1));
   }
 
-  // One stage's phase in degrees, in FilterPro's table convention: the MFB
-  // inversion (180°) is not included, so an MFB low-pass reads like any other
-  // low-pass (e.g. −169.4°, not +10.6°). Principal value, (−180°, 180°].
+  // One stage's phase in degrees, in FilterPro's table convention: the
+  // inversion (180°) of MFB stages and the notch is not included, so an MFB
+  // low-pass reads like any other low-pass (e.g. −169.4°, not +10.6°), and an
+  // MFB high-pass / band-pass reads +90° / 0° at fn. Principal value, (−180°, 180°].
   function stagePhaseDeg(solved, f, gbw) {
     let h = stageH(solved, f, gbw);
     if (netlistFor(solved).inverting) h = cx(-h.re, -h.im);
