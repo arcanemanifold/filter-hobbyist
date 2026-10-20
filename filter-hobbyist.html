@@ -98,5 +98,141 @@
   window.FH.units = { SERIES, parseEng, formatEng, roundToSeries, stepSeries };
 })();
 </script>
+<script data-module="poles">
+(function () {
+  // Chebyshev edge: 'ripple-edge' puts w=1 at the ripple band edge (TI style);
+  // flip to '3dB' to normalize to the -3 dB point instead (spec check 1).
+  const CHEBY_NORM = 'ripple-edge';
+
+  // Turn a list of left-half-plane poles (upper-half only, plus any real ones)
+  // into stages: real pole first, then pairs sorted by ascending Q.
+  // pole {re, im}: wn = |p|, Q = wn / (2 |re|).
+  function toStages(poles) {
+    const reals = [], pairs = [];
+    for (const p of poles) {
+      const wn = Math.hypot(p.re, p.im);
+      if (Math.abs(p.im) < 1e-9 * wn) reals.push({ kind: 'real', wn });
+      else pairs.push({ kind: 'pair', wn, q: wn / (2 * Math.abs(p.re)) });
+    }
+    pairs.sort((a, b) => a.q - b.q);
+    return reals.concat(pairs);
+  }
+
+  // Butterworth: poles on the unit circle, at angle theta_k from the jw axis.
+  function butterworth(n) {
+    const poles = [];
+    for (let k = 1; k <= Math.floor(n / 2); k++) {
+      const th = (2 * k - 1) * Math.PI / (2 * n);
+      poles.push({ re: -Math.sin(th), im: Math.cos(th) });
+    }
+    if (n % 2) poles.push({ re: -1, im: 0 });
+    return toStages(poles);
+  }
+
+  // Chebyshev type I: Butterworth-like poles squeezed onto an ellipse.
+  // eps sets the ripple; a = asinh(1/eps)/n. Edge of ripple band at w = 1.
+  function chebyshev(n, rippleDb) {
+    const eps = Math.sqrt(Math.pow(10, rippleDb / 10) - 1);
+    const a = Math.asinh(1 / eps) / n;
+    const poles = [];
+    for (let k = 1; k <= Math.floor(n / 2); k++) {
+      const th = (2 * k - 1) * Math.PI / (2 * n);
+      poles.push({ re: -Math.sinh(a) * Math.sin(th), im: Math.cosh(a) * Math.cos(th) });
+    }
+    if (n % 2) poles.push({ re: -Math.sinh(a), im: 0 });
+    if (CHEBY_NORM === '3dB') {
+      // Scale so |H(j1)| = -3 dB: cutoff = cosh(acosh(1/eps)/n).
+      const f = Math.cosh(Math.acosh(1 / eps) / n);
+      for (const p of poles) { p.re /= f; p.im /= f; }
+    }
+    return toStages(poles);
+  }
+
+  // --- Bessel -------------------------------------------------------------
+  // Reverse Bessel polynomial: theta_n(s) = sum a_k s^k,
+  // a_k = (2n-k)! / (2^(n-k) k! (n-k)!). Its roots are the Bessel poles
+  // (unit group delay at DC); we then rescale so the -3 dB point is w = 1.
+  function factorial(m) { let f = 1; for (let i = 2; i <= m; i++) f *= i; return f; }
+
+  function besselCoeffs(n) {
+    const a = [];
+    for (let k = 0; k <= n; k++) {
+      a.push(factorial(2 * n - k) / (Math.pow(2, n - k) * factorial(k) * factorial(n - k)));
+    }
+    return a; // a[k] multiplies s^k; a[n] is the leading coefficient
+  }
+
+  // Complex helpers on [re, im] pairs.
+  const cmul = (x, y) => [x[0] * y[0] - x[1] * y[1], x[0] * y[1] + x[1] * y[0]];
+  const csub = (x, y) => [x[0] - y[0], x[1] - y[1]];
+  function cdiv(x, y) {
+    const d = y[0] * y[0] + y[1] * y[1];
+    return [(x[0] * y[0] + x[1] * y[1]) / d, (x[1] * y[0] - x[0] * y[1]) / d];
+  }
+
+  // Durand-Kerner: refine all n roots at once; each root is moved by
+  // p(z_i) / prod_{j != i}(z_i - z_j). Start on a spiral of distinct points.
+  function polyRoots(coeffs) {
+    const n = coeffs.length - 1;
+    const c = coeffs.map(v => v / coeffs[n]); // monic
+    const z = [];
+    for (let i = 0; i < n; i++) {
+      const ang = 2 * Math.PI * i / n + 0.4;
+      z.push([Math.cos(ang) * (1 + 0.3 * i), Math.sin(ang) * (1 + 0.3 * i)]);
+    }
+    for (let iter = 0; iter < 500; iter++) {
+      let maxStep = 0;
+      for (let i = 0; i < n; i++) {
+        let p = [1, 0]; // Horner, highest power first
+        for (let k = n - 1; k >= 0; k--) p = cmul(p, z[i]), p[0] += c[k];
+        let den = [1, 0];
+        for (let j = 0; j < n; j++) if (j !== i) den = cmul(den, csub(z[i], z[j]));
+        const step = cdiv(p, den);
+        z[i] = csub(z[i], step);
+        maxStep = Math.max(maxStep, Math.hypot(step[0], step[1]));
+      }
+      if (maxStep < 1e-14) break;
+    }
+    return z;
+  }
+
+  function bessel(n) {
+    const a = besselCoeffs(n);
+    const roots = polyRoots(a);
+    // |H(jw)| = a0 / |theta_n(jw)|. Find w3 where it equals 1/sqrt(2).
+    const mag = w => {
+      let re = 0, im = 0; // sum a_k (jw)^k
+      for (let k = 0; k <= n; k++) {
+        const r = a[k] * Math.pow(w, k);
+        const ph = k % 4;
+        if (ph === 0) re += r; else if (ph === 1) im += r;
+        else if (ph === 2) re -= r; else im -= r;
+      }
+      return a[0] / Math.hypot(re, im);
+    };
+    let lo = 0, hi = 1;
+    while (mag(hi) > Math.SQRT1_2) hi *= 2;
+    for (let i = 0; i < 100; i++) {
+      const mid = (lo + hi) / 2;
+      if (mag(mid) > Math.SQRT1_2) lo = mid; else hi = mid;
+    }
+    const w3 = (lo + hi) / 2;
+    // Keep upper-half-plane poles plus the real one, scaled by 1/w3.
+    const poles = roots
+      .filter(r => r[1] > 1e-9 || Math.abs(r[1]) <= 1e-9)
+      .map(r => ({ re: r[0] / w3, im: Math.abs(r[1]) < 1e-9 ? 0 : r[1] / w3 }));
+    return toStages(poles);
+  }
+
+  function prototype(response, order, rippleDb) {
+    if (response === 'butterworth') return butterworth(order);
+    if (response === 'chebyshev') return chebyshev(order, rippleDb);
+    if (response === 'bessel') return bessel(order);
+    throw new Error('Unknown response: ' + response);
+  }
+
+  window.FH.poles = { prototype, CHEBY_NORM };
+})();
+</script>
 </body>
 </html>
