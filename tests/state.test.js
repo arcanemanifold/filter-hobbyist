@@ -111,3 +111,15 @@ test('initial precedence: hash > storage > defaults', () => {
   assert.deepStrictEqual(plain(S.initial('', store('{"fc":"x","poles":99,"zz":1}'))), plain(Object.assign(S.defaults(), { poles: 10 })));
   assert.deepStrictEqual(plain(S.initial('', { getItem() { throw new Error('blocked'); } })), plain(S.defaults()));
 });
+
+test('inherited and __proto__ labels are ignored, no prototype pollution', () => {
+  const vmProto = Object.getPrototypeOf(S.defaults().entries);
+  const check = s => {
+    assert.deepStrictEqual(Object.keys(s.entries), []);
+    assert.strictEqual(({}).c1, undefined);
+    assert.strictEqual(vmProto.c1, undefined);
+  };
+  check(S.decodeHash('#__proto__.c1=5&toString.c1=5&constructor.c1=5&hasOwnProperty.gain=2'));
+  check(S.initial('', { getItem: () => '{"entries":{"__proto__":{"c1":5},"toString":{"c1":5},"constructor":{"c1":5}}}' }));
+  check(S.normalize(JSON.parse('{"entries":{"__proto__":{"c1":5}}}')));
+});

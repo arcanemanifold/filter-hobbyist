@@ -973,7 +973,7 @@
     if (out.passband === 'bp') out.circuit = 'mfb';
 
     // Keep typed parts only for rows that exist now, and only valid numbers.
-    const rows = {};
+    const rows = Object.create(null);
     window.FH.stages.build(out).forEach(st => { rows[st.label] = true; });
     const src = s.entries && typeof s.entries === 'object' && !Array.isArray(s.entries) ? s.entries : {};
     Object.keys(src).forEach(label => {
@@ -1002,8 +1002,8 @@
   }
 
   function decodeHash(hash) {
-    const raw = {};
-    const entries = {};
+    const raw = Object.create(null);
+    const entries = Object.create(null);
     String(hash || '').replace(/^#/, '').split('&').forEach(pair => {
       const i = pair.indexOf('=');
       if (i <= 0) return;
@@ -1015,7 +1015,7 @@
         const label = key.slice(0, dot), part = key.slice(dot + 1);
         if (PART_KEYS.indexOf(part) < 0) return;
         const n = val.trim() === '' ? NaN : Number(val);
-        if (!isNaN(n)) (entries[label] = entries[label] || {})[part] = n;
+        if (!isNaN(n)) (entries[label] = entries[label] || Object.create(null))[part] = n;
         return;
       }
       raw[key] = val;
