@@ -1,4 +1,4 @@
-#Filter Hobbyist
+# Filter Hobbyist
 
 This is a port of the wonderful (if janky) TI Filterpro 2.0 to a standalone html file. 
 
