@@ -44,7 +44,7 @@ Wide band-pass, band-reject, linear-phase and Gaussian responses, Custom Fn & Q,
 
 ## Layout (from the decoded VB6 form and John's screenshots)
 
-The window is about 880×560 px. Reference screenshots are in `recon/screenshots/` (numbered in the order John sent them), and the decoded layout is in `recon/form1.txt`.
+The window is about 880×560 px. The reference screenshots and the decoded layout were kept local, because they are TI material. What they showed is summarized in `docs/2026-10-20-filterpro-reference.md`.
 
 - **Top-left:** app title in place of the TI logo. Below it a **context help box**: a description of the selected filter type, replaced by a hint for whichever field has focus (e.g. "The current value of this capacitor is 22.0nF. You may enter a new value…").
 - **Top-centre graph:** log frequency axis.
