@@ -239,3 +239,15 @@ test('totalsQ: one exact band-pass section measures its own Q', () => {
   const q = R.totalsQ(list, 'bp');
   assert.ok(Math.abs(q / 10 - 1) < 0.01, `bp Q ${q}`);
 });
+
+test('totalsQ returns null for an empty list or a stage with an error', () => {
+  assert.strictEqual(R.totalsQ([], 'lp'), null);
+  assert.strictEqual(R.totalsQ([], 'notch'), null);
+  const list = solveAll(Object.assign({ passband: 'lp', response: 'butterworth' }, base4), 'mfb');
+  const bad = list.slice();
+  bad[0] = { stage: list[0].stage, circuit: 'mfb', parts: null, gainActual: null, error: 'refused' };
+  assert.strictEqual(R.totalsQ(bad, 'lp'), null);
+  const nul = list.slice();
+  nul[1] = { stage: list[1].stage, parts: null };
+  assert.strictEqual(R.totalsQ(nul, 'hp'), null);
+});

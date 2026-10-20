@@ -124,3 +124,8 @@ test('inherited and __proto__ labels are ignored, no prototype pollution', () =>
   check(S.initial('', { getItem: () => '{"entries":{"__proto__":{"c1":5},"toString":{"c1":5},"constructor":{"c1":5}}}' }));
   check(S.normalize(JSON.parse('{"entries":{"__proto__":{"c1":5}}}')));
 });
+
+test('normalize drops a notch gain entry, keeps c1', () => {
+  const s = plain(S.decodeHash('#passband=notch&poles=1&A.gain=3&A.c1=4.7e-8'));
+  assert.deepStrictEqual(s.entries, { A: { c1: 4.7e-8 } });
+});

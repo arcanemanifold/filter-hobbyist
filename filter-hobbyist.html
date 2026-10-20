@@ -1207,7 +1207,7 @@
   //                f0/1000). f0 is found by bisection on the slope of |H|,
   //                f1 and f2 by bisection on |H| against the −3 dB level.
   function totalsQ(list, passband) {
-    if (!list.length) return null;
+    if (!list.length || list.some(s => !s || s.error || !s.parts)) return null;
     if (passband === 'lp' || passband === 'hp') {
       const qs = list.filter(s => s.stage.kind === 'pair').map(s => s.stage.q);
       return qs.length ? qs.reduce((a, q) => a * q, 1) : null;
@@ -1285,6 +1285,7 @@
       if (!rows[label] || !e || typeof e !== 'object') return;
       const kept = {};
       PART_KEYS.forEach(k => { if (isPosNum(e[k])) kept[k] = e[k]; });
+      if (out.passband === 'notch') delete kept.gain; // notch is unity-gain (old links may carry one)
       if (Object.keys(kept).length) out.entries[label] = kept;
     });
     return out;
@@ -2057,7 +2058,10 @@
   $('passband').addEventListener('change', e => {
     const next = { ...state, passband: e.target.value };
     let notice = null;
-    if ((next.passband === 'bp' || next.passband === 'notch') && state.poles > 5) {
+    if (next.passband === 'notch' && state.passband !== 'notch') {
+      next.poles = 1; // FilterPro's notch default
+      notice = 'Notch starts with 1 section.';
+    } else if ((next.passband === 'bp' || next.passband === 'notch') && state.poles > 5) {
       next.poles = 5;
       notice = `${PASSBAND_NAMES[next.passband]} allows 1 to 5 sections, so Sections is now 5.`;
     }
