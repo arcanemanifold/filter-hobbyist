@@ -276,5 +276,223 @@
   window.FH.stages = { build };
 })();
 </script>
+<script data-module="solve">
+(function () {
+  const { formatEng, roundToSeries, stepSeries } = window.FH.units;
+  const MAX_CAP = 1e-6;
+  const CAP_LIMIT_MSG = 'Capacitors are not supported above 1uF.';
+
+  // Solve one stage's parts.
+  //   stage:   { label, role, kind: 'real'|'pair', fn, q, gain } from FH.stages
+  //   circuit: 'mfb' | 'sk'
+  //   entry:   user caps { c1?, c2? } (farads), kept exactly as typed
+  //   opts:    { resSeries, capSeries, seed }  seed = R1 Seed in ohms
+  // Returns { stage, circuit, parts, gainActual, error }. On a refusal parts is
+  // null and error says why. Part values are rounded to their series
+  // ("Exact" leaves them unrounded).
+  function stage(st, circuit, entry, opts) {
+    entry = entry || {};
+    const ctx = {
+      st, entry, seed: opts.seed,
+      w0: 2 * Math.PI * st.fn,
+      // Base cap: the C that would pair with R = seed at fn.
+      c0: 1 / (2 * Math.PI * st.fn * opts.seed),
+      roundR: x => roundToSeries(x, opts.resSeries),
+      roundC: x => roundToSeries(x, opts.capSeries),
+      capSeries: opts.capSeries,
+    };
+    const fail = error => ({ stage: st, circuit, parts: null, gainActual: null, error });
+
+    for (const k of ['c1', 'c2', 'c3']) {
+      if (entry[k] != null && entry[k] > MAX_CAP) return fail(CAP_LIMIT_MSG);
+    }
+
+    let out;
+    if (st.kind === 'real') out = solveRealPole(ctx);
+    else if (circuit === 'mfb') out = solveMfbLowPass(ctx);
+    else if (circuit === 'sk') out = solveSkLowPass(ctx);
+    else return fail(`Unknown circuit: ${circuit}`);
+
+    if (out.error) return fail(out.error);
+    // A cap computed from an entered one can still land above the limit.
+    for (const [name, v] of Object.entries(out.parts)) {
+      if (name[0] === 'C' && v > MAX_CAP) return fail(CAP_LIMIT_MSG);
+    }
+    return { stage: st, circuit, parts: out.parts, gainActual: out.gainActual, error: null };
+  }
+
+  // ---- Real pole: R1 + C1 to ground, then a unity buffer --------------------
+  // fn = 1/(2π·R·C). Pick C (entered, or C0 rounded, capped at 1uF),
+  // then solve R from it.
+  function solveRealPole(ctx) {
+    const C = ctx.entry.c1 != null ? ctx.entry.c1 : ctx.roundC(Math.min(ctx.c0, MAX_CAP));
+    const R = ctx.roundR(1 / (ctx.w0 * C));
+    return { parts: { R1: R, C1: C }, gainActual: 1 };
+  }
+
+  // ---- Default cap pair ------------------------------------------------------
+  // Both topologies need one cap bigger than the other by at least minRatio
+  // (otherwise the resistor quadratic has no real root). Default: aim for
+  // 1.5x that minimum, centred (geometrically) on C0, round both, then widen
+  // the gap one series step at a time until there is at least 1.2x margin
+  // left after rounding.
+  //   enteredBig / enteredSmall: a user-entered cap in that position, if any.
+  //   The entered cap is never changed; only the other one is chosen.
+  // Returns { big, small }.
+  function defaultCapPair(ctx, minRatio, enteredBig, enteredSmall) {
+    const r = 1.5 * minRatio;
+    const target = 1.2 * minRatio;
+    const step = (x, dir) => stepSeries(x, ctx.capSeries, dir);
+    let big, small;
+    if (enteredBig != null) {
+      big = enteredBig;
+      small = ctx.roundC(big / r);
+      while (big / small < target) {
+        const next = step(small, -1);
+        if (!(next < small)) break; // "Exact" series: nothing to step
+        small = next;
+      }
+    } else if (enteredSmall != null) {
+      small = enteredSmall;
+      big = ctx.roundC(small * r);
+      while (big / small < target) {
+        const next = step(big, +1);
+        if (!(next > big)) break;
+        big = next;
+      }
+    } else {
+      // Keep the big cap at or under 1uF: at very low fn, C0 alone exceeds it,
+      // so slide the centre down (the resistors scale up to compensate).
+      const centre = Math.min(ctx.c0, MAX_CAP / Math.sqrt(r));
+      big = ctx.roundC(centre * Math.sqrt(r));
+      small = ctx.roundC(centre / Math.sqrt(r));
+      while (big / small < target) {
+        // Normally step the big cap up; if that would pass 1uF, step the small one down.
+        const up = step(big, +1);
+        if (up > big && up <= MAX_CAP) { big = up; continue; }
+        const down = step(small, -1);
+        if (!(down < small)) break;
+        small = down;
+      }
+    }
+    return { big, small };
+  }
+
+  // ---- MFB low-pass ------------------------------------------------------------
+  // R1 from the input to node X, C2 from X to ground, R2 from X to the output
+  // (gain-setting feedback), R3 from X to the inverting input, C1 from the
+  // output to the inverting input. Gain G = R2/R1 (inverting).
+  //   ω0²      = 1/(R2·R3·C1·C2)
+  //   1/(Q·ω0) = C1·(R2 + R3 + R2·R3/R1) = C1·(R2 + (1+G)·R3)
+  // Substituting R3 = 1/(ω0²·R2·C1·C2) and multiplying by R2/C1 gives one
+  // quadratic in R2:
+  //     R2² − R2/(Q·ω0·C1) + (1+G)/(ω0²·C1·C2) = 0
+  // Real roots need the discriminant ≥ 0:  C2/C1 ≥ 4·Q²·(1+G).
+  function solveMfbLowPass(ctx) {
+    const { st, entry, w0 } = ctx;
+    const Q = st.q, G = st.gain;
+    const minRatio = 4 * Q * Q * (1 + G);
+
+    let C1, C2;
+    if (entry.c1 != null && entry.c2 != null) {
+      C1 = entry.c1; C2 = entry.c2;
+    } else {
+      // C2 is the big cap, C1 the small one.
+      const pair = defaultCapPair(ctx, minRatio, entry.c2, entry.c1);
+      C1 = pair.small; C2 = pair.big;
+    }
+    // Tiny tolerance so a ratio exactly at the bound isn't refused by float noise.
+    if (C2 / C1 < minRatio * (1 - 1e-12)) {
+      return { error: `C2 must be ≥ ${formatEng(minRatio * C1)} for Q = ${Q.toFixed(2)} at gain ${G}` };
+    }
+
+    // Quadratic x² + p·x + q = 0 with p = −1/(Q·ω0·C1), q = (1+G)/(ω0²·C1·C2).
+    // FilterPro takes the smaller root (it gives the lower-impedance R2).
+    const half = 1 / (2 * Q * w0 * C1);                  // −p/2
+    const qTerm = (1 + G) / (w0 * w0 * C1 * C2);
+    const disc = Math.max(0, half * half - qTerm);         // ≥ 0 by the check above
+    const R2 = ctx.roundR(half - Math.sqrt(disc));
+    const R1 = ctx.roundR(R2 / G);
+    // R3 sets fn: recompute it from the *rounded* R2, as FilterPro does.
+    const R3 = ctx.roundR(1 / (w0 * w0 * R2 * C1 * C2));
+    return { parts: { R1, R2, R3, C1, C2 }, gainActual: R2 / R1 };
+  }
+
+  // Smallest Cf/Cg that gives a real, positive R1 for Sallen-Key at gain K.
+  // From the discriminant of the R1 quadratic below (with m = Cf/Cg):
+  //   1/Q² ≥ 4·(1/m + 1 − K)   →   m ≥ 1 / (1/(4Q²) + K − 1)
+  // K = 1 gives the familiar Cf/Cg ≥ 4Q². Higher K relaxes it quickly.
+  // Returns Infinity when no ratio works (K below 1 with high Q).
+  function skMinRatio(Q, K) {
+    const d = 1 / (4 * Q * Q) + K - 1;
+    return d > 0 ? 1 / d : Infinity;
+  }
+
+  // ---- Sallen-Key low-pass --------------------------------------------------
+  // R1 from the input to node X, R2 from X to the + input, C2 (Cg) from the
+  // + input to ground, C1 (Cf) from X to the output. Non-inverting gain
+  // K = 1 + R4/R3, with R3 (to ground) = the seed.
+  //   a = R1·R2·Cf·Cg               = 1/ω0²
+  //   b = Cg·(R1+R2) + R1·Cf·(1−K)  = 1/(Q·ω0)
+  // Substituting R2 = a/(R1·Cf·Cg) into b gives a quadratic in R1:
+  //   (Cg + Cf·(1−K))·R1² − b·R1 + a/Cf = 0
+  // Uses the gain as typed (K), not the gain the rounded R3/R4 give.
+  function solveSkLowPass(ctx) {
+    const { st, entry, w0 } = ctx;
+    const Q = st.q, K = st.gain;
+    const minRatio = skMinRatio(Q, K);
+    if (!isFinite(minRatio)) {
+      return { error: `Sallen-Key gain must be ≥ 1 for Q = ${Q.toFixed(2)} (got ${K})` };
+    }
+
+    let Cf, Cg;
+    if (entry.c1 != null && entry.c2 != null) {
+      Cf = entry.c1; Cg = entry.c2;
+    } else {
+      // Cf (C1) is the big cap, Cg (C2) the small one.
+      const pair = defaultCapPair(ctx, minRatio, entry.c1, entry.c2);
+      Cf = pair.big; Cg = pair.small;
+    }
+    // Tiny tolerance so a ratio exactly at the bound isn't refused by float noise.
+    if (Cf / Cg < minRatio * (1 - 1e-12)) {
+      return { error: `C1/C2 must be ≥ ${minRatio.toFixed(2)} for Q = ${Q.toFixed(2)} at gain ${K}` };
+    }
+
+    const a = 1 / (w0 * w0);
+    const b = 1 / (Q * w0);
+    const A = Cg + Cf * (1 - K);
+    const C = a / Cf;
+    let roots;
+    if (Math.abs(A) < 1e-30) {
+      roots = [C / b];                                    // linear: −b·R1 + C = 0
+    } else {
+      const s = Math.sqrt(Math.max(0, b * b - 4 * A * C));
+      roots = [(b - s) / (2 * A), (b + s) / (2 * A)];
+    }
+    const positive = roots.filter(x => x > 0).sort((x, y) => x - y);
+    if (positive.length === 0) {
+      return { error: `C1/C2 must be ≥ ${minRatio.toFixed(2)} for Q = ${Q.toFixed(2)} at gain ${K}` };
+    }
+    // One positive root (large K): that's it. Two (e.g. unity gain): FilterPro's
+    // pick is unknown (spec check 5), so take the one with R1 ≤ R2.
+    const r2For = r1 => a / (r1 * Cf * Cg);
+    let R1exact = positive.find(r1 => r1 <= r2For(r1));
+    if (R1exact === undefined) R1exact = positive[0];
+
+    const R1 = ctx.roundR(R1exact);
+    const R2 = ctx.roundR(a / (R1 * Cf * Cg));          // from the rounded R1
+    const R3 = ctx.roundR(ctx.seed);
+    const parts = { R1, R2, R3, C1: Cf, C2: Cg };
+    let gainActual = 1;
+    if (K > 1) {
+      parts.R4 = ctx.roundR((K - 1) * R3);
+      gainActual = 1 + parts.R4 / R3;
+    }
+    return { parts, gainActual };
+  }
+
+  window.FH.solve = { stage, skMinRatio };
+})();
+</script>
 </body>
 </html>
