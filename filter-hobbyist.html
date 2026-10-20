@@ -1174,6 +1174,8 @@
   //   MFB pair:  100·Q·fn·G
   //   SK pair:   206·G·Q^1.5·fn
   // G is the gain the rounded parts actually give (e.g. 1.996, 10.09).
+  // Known, unresolved: at unity gain FilterPro asks 100k (SK, Q 0.5412) and
+  // 223k (Q 1.3066) at 1 kHz; this rule gives 82k and 308k. Left as is.
   // Band-pass and notch: no rule, null.
   function requiredGBP(solved) {
     const st = solved.stage;
