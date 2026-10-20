@@ -816,8 +816,11 @@
   // For K ≥ 1 the constant term is ≤ 0, so there is always exactly one
   // positive root (K = 1: Rf = b/(C1+C2); equal caps give Rf = 1/(2Q·ω0·C),
   // Rg = 2Q/(ω0·C)). No cap ratio constraint.
-  // Default caps C1 = C2 = round(C0). Rf (from the Q quadratic) is rounded
-  // first and Rg recomputed from it so fn holds, as in the SK low-pass.
+  // Unity gain this is simply
+  //   R1 (gnd) = Rg = Q·(C1+C2)/(ω0·C1·C2),   R2 (fb) = Rf = 1/(ω0²·Rg·C1·C2)
+  // Default caps C1 = C2 = round(C0). Like FilterPro, both resistors are
+  // rounded independently from the exact pair (not one rounded and the other
+  // recomputed from it, as in the SK low-pass).
   function solveSkHighPass(ctx) {
     const { st, w0 } = ctx;
     const Q = st.q, K = st.gain;
@@ -830,8 +833,8 @@
     const A = C1 + C2;
     const C = a * (1 - K) / C1;                             // ≤ 0 for K ≥ 1
     const RfExact = (b + Math.sqrt(b * b - 4 * A * C)) / (2 * A);
-    const Rf = ctx.roundR(RfExact);
-    const Rg = ctx.roundR(a / (Rf * C1 * C2));              // from the rounded Rf
+    const RgExact = a / (RfExact * C1 * C2);
+    const Rf = ctx.roundR(RfExact), Rg = ctx.roundR(RgExact); // each on its own
     const R3 = ctx.roundR(ctx.seed);
     const parts = { R1: Rg, R2: Rf, R3, C1, C2 };
     let gainActual = 1;

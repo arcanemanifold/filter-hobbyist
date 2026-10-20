@@ -317,3 +317,30 @@ test('golden: MFB HP Butterworth 4-pole defaults (FilterPro labels)', () => {
   assert.strictEqual(formatEng(b.parts.R2), '2.74k'); // FilterPro: 2.67k (see above)
   assert.strictEqual(R.point([a], 1e3, null).db.toFixed(2), '-5.25');
 });
+
+// ---- Round 2: SK HP rounds both resistors from the exact pair ---------------
+// Butterworth 4-pole HP, 1 kHz, E96, caps entered C1 47n, C2 10n (hpf 4p 1khz sk).
+test('golden: SK HP rounds R1 (gnd) and R2 (fb) independently', () => {
+  const s = build(state());
+  const caps = { c1: 47e-9, c2: 10e-9 };
+  const a = solve(byLabel(s, 'A'), 'sk', caps), b = solve(byLabel(s, 'B'), 'sk', caps);
+  assert.strictEqual(b.error, null, b.error);
+  assert.strictEqual(formatEng(b.parts.R1), '25.5k');
+  assert.strictEqual(formatEng(b.parts.R2), '2.15k');
+  assert.strictEqual(R.point([b], 1e3, null).db.toFixed(2), '2.42');
+  assert.strictEqual(a.error, null, a.error);
+  assert.strictEqual(formatEng(a.parts.R1), '10.5k');
+  // FilterPro *draws* 5.23k for A's R2, but its own −5.29 dB at 1 kHz only
+  // matches 5.11k (the log-nearest E96 value to the exact 5159). Assert 5.11k.
+  assert.strictEqual(formatEng(a.parts.R2), '5.11k');
+  assert.strictEqual(R.point([a], 1e3, null).db.toFixed(2), '-5.29');
+});
+
+test('SK HP gain > 1: exact pair from the quadratic, each rounded on its own', () => {
+  const st = byLabel(build(state({ entries: { B: { gain: 2 } } })), 'B');
+  const exact = solve(st, 'sk', { c1: 47e-9, c2: 10e-9 }, { resSeries: 'Exact' });
+  const e96 = solve(st, 'sk', { c1: 47e-9, c2: 10e-9 });
+  for (const k of ['R1', 'R2']) {
+    assert.strictEqual(e96.parts[k], FH.units.roundToSeries(exact.parts[k], 'E96'), k);
+  }
+});

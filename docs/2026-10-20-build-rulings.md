@@ -35,3 +35,5 @@ Each line gives what was decided, why, and what it costs if it's wrong. Recorded
 - Ruling: MFB HP wiring taken from FilterPro's drawing (C2 middle node → output, R1 − input → output); the round-2 brief's parentheticals had these two swapped, but its own "Gain = C1/C2" and the screenshot agree — cost: none if the screenshot is right.
 - Ruling: golden case 10 caps moved to c1 39n (gnd), c2 10n (fb) for the SK LP label swap, same expected resistors; SK refusal now reads "C2/C1 must be ≥ …" — cost: none.
 - Ruling: known, unresolved — MFB HP section B shunt R2: FilterPro 2.67k, ours 2.74k (exact 2706.9 sits 0.08 % above the E96 log midpoint 2704.7); test asserts ours — cost: one E96 step on that part if FilterPro's rounding rule is found.
+- Ruling: SK HP rounds R1 (gnd) and R2 (fb) independently from the exact pair, as FilterPro does (supersedes the round-1 "rounds R1 first" ruling); SK LP keeps round-then-recompute — cost: none, matches the screenshot.
+- Ruling: SK HP section A R2 asserted 5.11k, not the 5.23k FilterPro draws — FilterPro's own −5.29 dB at 1 kHz only matches 5.11k — cost: one E96 step if the drawing is right and the table wrong.
