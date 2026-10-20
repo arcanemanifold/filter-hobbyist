@@ -496,5 +496,216 @@
   window.FH.solve = { stage, skMinRatio };
 })();
 </script>
+<script data-module="response">
+(function () {
+  // ---- Complex arithmetic ---------------------------------------------------
+  // Plain {re, im} objects. Only what nodal analysis needs.
+  const cx = (re, im = 0) => ({ re, im });
+  const add = (a, b) => cx(a.re + b.re, a.im + b.im);
+  const sub = (a, b) => cx(a.re - b.re, a.im - b.im);
+  const mul = (a, b) => cx(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re);
+  const div = (a, b) => {
+    const d = b.re * b.re + b.im * b.im;
+    return cx((a.re * b.re + a.im * b.im) / d, (a.im * b.re - a.re * b.im) / d);
+  };
+  const mag = a => Math.hypot(a.re, a.im);
+  const argDeg = a => Math.atan2(a.im, a.re) * 180 / Math.PI;
+
+  // ---- Netlists ---------------------------------------------------------------
+  // One row per (role, kind/circuit). Each takes a stage's parts and returns
+  //   elements: [type, nodeA, nodeB, value], type 'R' (ohms) or 'C' (farads)
+  //   opamp:    { plus, minus, out }: a voltage source out = A·(v+ − v−)
+  //   inverting: true when the passband gain is negative (MFB)
+  // Nodes: 'in' is driven with 1 V, 'gnd' is 0 V, everything else is solved
+  // for. Shared names: in, n1, n2, out (n3 only for the SK gain divider).
+  // Part names follow the global convention: LP C1 = feedback, C2 = to ground.
+  const NETLISTS = {
+    // Real pole: R1 into n1, C1 from n1 to ground, unity buffer (− tied to out).
+    'lp/real': p => ({
+      elements: [['R', 'in', 'n1', p.R1], ['C', 'n1', 'gnd', p.C1]],
+      opamp: { plus: 'n1', minus: 'out', out: 'out' },
+      inverting: false,
+    }),
+    // MFB low-pass: R1 in→n1, R2 n1→out, R3 n1→n2 (inverting input),
+    // C1 n2→out (feedback), C2 n1→ground. + input grounded. Gain −R2/R1.
+    'lp/mfb': p => ({
+      elements: [
+        ['R', 'in', 'n1', p.R1], ['R', 'n1', 'out', p.R2], ['R', 'n1', 'n2', p.R3],
+        ['C', 'n2', 'out', p.C1], ['C', 'n1', 'gnd', p.C2],
+      ],
+      opamp: { plus: 'gnd', minus: 'n2', out: 'out' },
+      inverting: true,
+    }),
+    // Sallen-Key low-pass: R1 in→n1, R2 n1→n2 (+ input), C1 n1→out (feedback),
+    // C2 n2→ground. With R4: − input at n3 = out·R3/(R3+R4) (R4 out→n3,
+    // R3 n3→ground), gain 1 + R4/R3. Without R4: unity buffer.
+    'lp/sk': p => {
+      const elements = [
+        ['R', 'in', 'n1', p.R1], ['R', 'n1', 'n2', p.R2],
+        ['C', 'n1', 'out', p.C1], ['C', 'n2', 'gnd', p.C2],
+      ];
+      let minus = 'out';
+      if (p.R4 != null) {
+        elements.push(['R', 'out', 'n3', p.R4], ['R', 'n3', 'gnd', p.R3]);
+        minus = 'n3';
+      }
+      return { elements, opamp: { plus: 'n2', minus, out: 'out' }, inverting: false };
+    },
+  };
+
+  function netlistFor(solved) {
+    const st = solved.stage;
+    const key = `${st.role}/${st.kind === 'real' ? 'real' : solved.circuit}`;
+    const make = NETLISTS[key];
+    if (!make) throw new Error(`No netlist for ${key}`);
+    return make(solved.parts);
+  }
+
+  // Op amp open-loop gain at f. A single-pole op amp has A(jω) ≈ ωT/(jω),
+  // i.e. 2π·gbw/(j·2πf) = −j·gbw/f. No gbw = "ideal": a very large real gain.
+  function opampGain(f, gbw) {
+    return gbw ? cx(0, -gbw / f) : cx(1e9);
+  }
+
+  // Solve M·x = b in place by Gaussian elimination with partial pivoting.
+  // At most 4 unknowns here, so no cleverness needed.
+  function solveLinear(M, b) {
+    const n = b.length;
+    for (let col = 0; col < n; col++) {
+      let pivot = col;
+      for (let r = col + 1; r < n; r++) if (mag(M[r][col]) > mag(M[pivot][col])) pivot = r;
+      [M[col], M[pivot]] = [M[pivot], M[col]];
+      [b[col], b[pivot]] = [b[pivot], b[col]];
+      for (let r = col + 1; r < n; r++) {
+        const k = div(M[r][col], M[col][col]);
+        for (let c = col; c < n; c++) M[r][c] = sub(M[r][c], mul(k, M[col][c]));
+        b[r] = sub(b[r], mul(k, b[col]));
+      }
+    }
+    const x = new Array(n);
+    for (let r = n - 1; r >= 0; r--) {
+      let s = b[r];
+      for (let c = r + 1; c < n; c++) s = sub(s, mul(M[r][c], x[c]));
+      x[r] = div(s, M[r][r]);
+    }
+    return x;
+  }
+
+  // H(j2πf) = v(out)/v(in) for one solved stage, by nodal analysis.
+  //   Every unknown node except the op amp output gets a KCL row:
+  //     Σ y·(v_node − v_other) = 0, with y = 1/R or jωC.
+  //   The output node's KCL would need the op amp's output current, which is
+  //   unknown, so that row is replaced by the op amp equation:
+  //     v_out − A·v+ + A·v− = 0
+  //   v(in) = 1 moves to the right-hand side; ground drops out.
+  function stageH(solved, f, gbw) {
+    const net = netlistFor(solved);
+    const w = 2 * Math.PI * f;
+    const nodes = [];
+    const ends = net.elements.map(([, a, b]) => [a, b]);
+    ends.push([net.opamp.out, net.opamp.plus, net.opamp.minus]);
+    for (const group of ends) {
+      for (const n of group) if (n !== 'in' && n !== 'gnd' && !nodes.includes(n)) nodes.push(n);
+    }
+    const idx = {};
+    nodes.forEach((n, i) => { idx[n] = i; });
+    const N = nodes.length;
+    const M = nodes.map(() => nodes.map(() => cx(0)));
+    const rhs = nodes.map(() => cx(0));
+
+    // Stamp each two-terminal element into the KCL rows of its ends.
+    for (const [type, a, b, value] of net.elements) {
+      const y = type === 'R' ? cx(1 / value) : cx(0, w * value);
+      for (const [here, there] of [[a, b], [b, a]]) {
+        if (!(here in idx)) continue;
+        const r = idx[here];
+        M[r][r] = add(M[r][r], y);
+        if (there in idx) M[r][idx[there]] = sub(M[r][idx[there]], y);
+        else if (there === 'in') rhs[r] = add(rhs[r], y); // y·v(in), v(in) = 1
+      }
+    }
+
+    // Op amp row replaces the output node's KCL.
+    const A = opampGain(f, gbw);
+    const o = idx[net.opamp.out];
+    for (let c = 0; c < N; c++) M[o][c] = cx(0);
+    rhs[o] = cx(0);
+    M[o][o] = cx(1);
+    const { plus, minus } = net.opamp;
+    if (plus in idx) M[o][idx[plus]] = sub(M[o][idx[plus]], A);
+    if (minus in idx) M[o][idx[minus]] = add(M[o][idx[minus]], A);
+
+    return solveLinear(M, rhs)[o];
+  }
+
+  // Product of the stages' responses (they are buffered, so they multiply).
+  function cascadeH(list, f, gbw) {
+    return list.reduce((h, s) => mul(h, stageH(s, f, gbw)), cx(1));
+  }
+
+  // One stage's phase in degrees, in FilterPro's table convention: the MFB
+  // inversion (180°) is not included, so an MFB low-pass reads like any other
+  // low-pass (e.g. −169.4°, not +10.6°). Principal value, (−180°, 180°].
+  function stagePhaseDeg(solved, f, gbw) {
+    let h = stageH(solved, f, gbw);
+    if (netlistFor(solved).inverting) h = cx(-h.re, -h.im);
+    return argDeg(h);
+  }
+
+  // Gain, phase and group delay of a cascade at one frequency.
+  //   db:    20·log10|H|
+  //   deg:   sum of the stage phases (so a 4-pole reads −345°, not +15°).
+  //          A sweep unwraps this further across frequency.
+  //   gdSec: −dφ/dω, central difference at f·(1 ± 0.001). The phase step is
+  //          taken as arg(H₊/H₋), which is already in (−π, π].
+  function point(list, f, gbw) {
+    const h = cascadeH(list, f, gbw);
+    const deg = list.reduce((sum, s) => sum + stagePhaseDeg(s, f, gbw), 0);
+    const fHi = f * 1.001, fLo = f * 0.999;
+    const hHi = cascadeH(list, fHi, gbw), hLo = cascadeH(list, fLo, gbw);
+    const ratio = div(hHi, hLo);
+    const dPhi = Math.atan2(ratio.im, ratio.re);
+    const gdSec = -dPhi / (2 * Math.PI * (fHi - fLo));
+    return { db: 20 * Math.log10(mag(h)), deg, gdSec };
+  }
+
+  // n log-spaced points from fStart to fStop, phase unwrapped (no jumps of
+  // more than 180° between neighbouring points).
+  function sweep(list, fStart, fStop, n = 400, gbw = null) {
+    const out = [];
+    let prev = null;
+    for (let i = 0; i < n; i++) {
+      const f = fStart * Math.pow(fStop / fStart, n > 1 ? i / (n - 1) : 0);
+      const p = point(list, f, gbw);
+      let deg = p.deg;
+      if (prev !== null) {
+        while (deg - prev > 180) deg -= 360;
+        while (deg - prev < -180) deg += 360;
+      }
+      prev = deg;
+      out.push({ f, db: p.db, deg, gdSec: p.gdSec });
+    }
+    return out;
+  }
+
+  // Rule-of-thumb op amp gain-bandwidth for a stage (FilterPro's Req. GBP):
+  //   real pole: 50·fn
+  //   MFB pair:  100·Q·fn·G
+  //   SK pair:   206·G·Q^1.5·fn
+  // G is the gain the rounded parts actually give (e.g. 1.996, 10.09).
+  // Band-pass and notch: no rule, null.
+  function requiredGBP(solved) {
+    const st = solved.stage;
+    if (st.role === 'bp' || st.role === 'notch') return null;
+    if (st.kind === 'real') return 50 * st.fn;
+    const G = solved.gainActual;
+    if (solved.circuit === 'mfb') return 100 * st.q * st.fn * G;
+    if (solved.circuit === 'sk') return 206 * G * Math.pow(st.q, 1.5) * st.fn;
+    return null;
+  }
+
+  window.FH.response = { stageH, cascadeH, point, sweep, requiredGBP, NETLISTS };
+})();
+</script>
 </body>
 </html>
