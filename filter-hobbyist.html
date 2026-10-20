@@ -924,5 +924,125 @@
   window.FH.response = { stageH, cascadeH, point, sweep, requiredGBP, NETLISTS };
 })();
 </script>
+<script data-module="state">
+(function () {
+  const STORAGE_KEY = 'fh.last';
+  const PASSBANDS = ['lp', 'hp', 'bp', 'notch'];
+  const CIRCUITS = ['mfb', 'sk'];
+  const RESPONSES = ['butterworth', 'bessel', 'chebyshev'];
+  const RES_SERIES = ['Exact', 'E12', 'E24', 'E96'];
+  const CAP_SERIES = ['E6', 'E12', 'E24'];
+  const PART_KEYS = ['c1', 'c2', 'c3', 'gain'];
+
+  function defaults() {
+    return {
+      passband: 'lp', circuit: 'mfb', response: 'chebyshev', poles: 4, fc: 1000, rippleDb: 1, bpQ: 10,
+      resSeries: 'E96', capSeries: 'E12', seed: 10000, cursor: 10000, entries: {}, gbw: null, showReal: false,
+    };
+  }
+
+  const isPosNum = v => typeof v === 'number' && isFinite(v) && v > 0;
+  const pickEnum = (v, allowed, dflt) => (allowed.indexOf(v) >= 0 ? v : dflt);
+  const pickPos = (v, dflt) => (isPosNum(v) ? v : dflt);
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  // Finite number clamped to [lo, hi], else the default.
+  const pickClamped = (v, lo, hi, dflt) => (typeof v === 'number' && isFinite(v) ? clamp(v, lo, hi) : dflt);
+
+  // Make any input (hash, storage JSON, half-edited UI state) into a valid State,
+  // falling back field by field to the defaults.
+  function normalize(input) {
+    const d = defaults();
+    const s = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+    const out = {
+      passband: pickEnum(s.passband, PASSBANDS, d.passband),
+      circuit: pickEnum(s.circuit, CIRCUITS, d.circuit),
+      response: pickEnum(s.response, RESPONSES, d.response),
+      fc: pickPos(s.fc, d.fc),
+      rippleDb: pickClamped(s.rippleDb, 0.01, 3, d.rippleDb), // 0 dB makes Chebyshev poles NaN
+      bpQ: pickClamped(s.bpQ, 0.5, 100, d.bpQ),
+      resSeries: pickEnum(s.resSeries, RES_SERIES, d.resSeries),
+      capSeries: pickEnum(s.capSeries, CAP_SERIES, d.capSeries),
+      seed: pickPos(s.seed, d.seed),
+      cursor: pickPos(s.cursor, d.cursor),
+      gbw: pickPos(s.gbw, null),
+      showReal: s.showReal === true,
+      entries: {},
+    };
+    const maxPoles = out.passband === 'bp' ? 5 : 10;
+    out.poles = Math.round(pickClamped(s.poles, 1, maxPoles, d.poles));
+    if (out.passband === 'bp') out.circuit = 'mfb';
+
+    // Keep typed parts only for rows that exist now, and only valid numbers.
+    const rows = {};
+    window.FH.stages.build(out).forEach(st => { rows[st.label] = true; });
+    const src = s.entries && typeof s.entries === 'object' && !Array.isArray(s.entries) ? s.entries : {};
+    Object.keys(src).forEach(label => {
+      const e = src[label];
+      if (!rows[label] || !e || typeof e !== 'object') return;
+      const kept = {};
+      PART_KEYS.forEach(k => { if (isPosNum(e[k])) kept[k] = e[k]; });
+      if (Object.keys(kept).length) out.entries[label] = kept;
+    });
+    return out;
+  }
+
+  // Compact "key=value&..." with entries as "A.c1=4.7e-9". The default-valued
+  // fields are written too, so a link keeps meaning if defaults change later.
+  function encodeHash(input) {
+    const s = normalize(input);
+    const parts = [];
+    ['passband', 'circuit', 'response', 'poles', 'fc', 'rippleDb', 'bpQ', 'resSeries', 'capSeries', 'seed', 'cursor']
+      .forEach(k => parts.push(k + '=' + s[k]));
+    if (s.gbw !== null) parts.push('gbw=' + s.gbw);
+    if (s.showReal) parts.push('showReal=1');
+    Object.keys(s.entries).sort().forEach(label => {
+      PART_KEYS.forEach(k => { if (k in s.entries[label]) parts.push(label + '.' + k + '=' + s.entries[label][k]); });
+    });
+    return parts.join('&');
+  }
+
+  function decodeHash(hash) {
+    const raw = {};
+    const entries = {};
+    String(hash || '').replace(/^#/, '').split('&').forEach(pair => {
+      const i = pair.indexOf('=');
+      if (i <= 0) return;
+      let key = pair.slice(0, i);
+      let val = pair.slice(i + 1);
+      try { key = decodeURIComponent(key); val = decodeURIComponent(val); } catch (e) { return; }
+      const dot = key.indexOf('.');
+      if (dot > 0) {
+        const label = key.slice(0, dot), part = key.slice(dot + 1);
+        if (PART_KEYS.indexOf(part) < 0) return;
+        const n = val.trim() === '' ? NaN : Number(val);
+        if (!isNaN(n)) (entries[label] = entries[label] || {})[part] = n;
+        return;
+      }
+      raw[key] = val;
+    });
+    const num = k => (raw[k] === undefined || raw[k].trim() === '' ? undefined : Number(raw[k]));
+    return normalize({
+      passband: raw.passband, circuit: raw.circuit, response: raw.response, resSeries: raw.resSeries, capSeries: raw.capSeries,
+      poles: num('poles'), fc: num('fc'), rippleDb: num('rippleDb'), bpQ: num('bpQ'),
+      seed: num('seed'), cursor: num('cursor'), gbw: num('gbw'),
+      showReal: raw.showReal === '1' || raw.showReal === 'true',
+      entries,
+    });
+  }
+
+  // Precedence: URL hash > localStorage 'fh.last' > defaults. Blocked or broken
+  // storage is ignored.
+  function initial(hash, storage) {
+    if (String(hash || '').replace(/^#/, '') !== '') return decodeHash(hash);
+    try {
+      const saved = storage && storage.getItem(STORAGE_KEY);
+      if (saved) return normalize(JSON.parse(saved));
+    } catch (e) { /* fall through to defaults */ }
+    return defaults();
+  }
+
+  window.FH.state = { defaults, normalize, encodeHash, decodeHash, initial, STORAGE_KEY };
+})();
+</script>
 </body>
 </html>
