@@ -440,10 +440,12 @@
   function solveSkLowPass(ctx) {
     const { st, entry, w0 } = ctx;
     const Q = st.q, K = st.gain;
-    const minRatio = skMinRatio(Q, K);
-    if (!isFinite(minRatio)) {
-      return { error: `Sallen-Key gain must be ≥ 1 for Q = ${Q.toFixed(2)} (got ${K})` };
+    // K = 1 + R4/R3 can't go below 1 with this circuit. (Some K < 1 would still
+    // give a real R1, but there is no R3/R4 that builds it, so refuse them all.)
+    if (!(K >= 1)) {
+      return { error: `Sallen-Key gain must be ≥ 1 (got ${K})` };
     }
+    const minRatio = skMinRatio(Q, K); // finite for any K ≥ 1
 
     let Cf, Cg;
     if (entry.c1 != null && entry.c2 != null) {

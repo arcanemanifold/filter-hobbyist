@@ -176,3 +176,12 @@ test('unity-gain SK omits R4', () => {
   assert.strictEqual(r.gainActual, 1);
   assert.ok(r.parts.R1 <= r.parts.R2 * 1.05, 'R1 <= R2 root (allowing rounding)');
 });
+
+test('SK refuses gain below 1', () => {
+  for (const gain of [0.9, 0.5]) {
+    const stage = { label: 'A', role: 'lp', kind: 'pair', fn: 1000, q: Math.SQRT1_2, gain };
+    const r = solve(stage, 'sk');
+    assert.strictEqual(r.parts, null, `gain ${gain}`);
+    assert.strictEqual(r.error, `Sallen-Key gain must be ≥ 1 (got ${gain})`);
+  }
+});
