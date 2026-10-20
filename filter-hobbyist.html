@@ -467,12 +467,15 @@
     };
     const stages = [];
 
+    // Band-pass and notch: Poles is the section count (1-5); identical
+    // sections at fc with the entered Q, chained. Band-pass gain defaults to
+    // Q; the notch is unity gain only (FilterPro leaves its Gain blank).
     if (s.passband === 'bp' || s.passband === 'notch') {
-      const count = s.passband === 'notch' ? 1 : Math.min(s.poles, PAIR_LABELS.length);
+      const count = Math.min(s.poles, PAIR_LABELS.length);
       for (let i = 0; i < count; i++) {
         const label = PAIR_LABELS[i];
-        const dflt = s.passband === 'bp' ? s.bpQ : 1;
-        stages.push({ label, role: s.passband, kind: 'pair', fn: s.fc, q: s.bpQ, gain: gainFor(label, dflt) });
+        const gain = s.passband === 'bp' ? gainFor(label, s.bpQ) : 1;
+        stages.push({ label, role: s.passband, kind: 'pair', fn: s.fc, q: s.bpQ, gain });
       }
       return stages;
     }
@@ -527,7 +530,7 @@
 
     let out;
     const hp = st.role === 'hp';
-    if (st.role === 'notch') out = solveNotch(ctx);        // one fixed topology
+    if (st.role === 'notch') out = solveNotch(ctx);        // one fixed topology (Fliege)
     else if (st.role === 'bp') {
       if (circuit !== 'mfb') return fail('Band-pass is MFB only.');
       out = solveMfbBandPass(ctx);
@@ -741,7 +744,7 @@
     return { parts, gainActual };
   }
 
-  // ---- Default equal caps (HP, BP, notch) -----------------------------------
+  // ---- Default equal caps (SK HP, BP) ----------------------------------------
   // These circuits use two equal caps by default. A cap the user typed is kept;
   // an empty one takes the other's typed value, else round(base) (base capped
   // at 1uF so very low fn still has a default; the resistors scale up).
@@ -848,8 +851,10 @@
   // FilterPro's default band-pass cap is about 1.7·C0 (27n at a 10k seed and
   // 1 kHz, where C0 = 15.9n). Kept in one place; provisional (spec check 3).
   const BP_CAP_FACTOR = 1.7;
+  // FilterPro's default notch cap is about 3·C0 (47n at a 10k seed and 1 kHz).
+  const NOTCH_CAP_FACTOR = 3;
 
-  // ---- MFB band-pass section (shared by band-pass and notch) -----------------
+  // ---- MFB band-pass (inverting; gain is the centre-frequency gain) ----------
   // R1 from the input to node X, R3 from X to ground, C1 from X to the output
   // (feedback), C2 from X to the inverting input, R2 from the inverting input
   // to the output (feedback). + input grounded.
@@ -863,13 +868,12 @@
   //   G < Q²·(C1+C2)/C1                     (equal caps: G < 2·Q²)
   // R2 (sets Q) is rounded first; R1 (gain) and then R3 (fn) are recomputed
   // from the rounded values. The centre gain doesn't depend on R3.
-  // Returns { parts, gainActual } or { error, bound } (bound = max gain).
-  function mfbBandPassSection(ctx, G) {
+  function solveMfbBandPass(ctx) {
     const { st, w0 } = ctx;
-    const Q = st.q;
+    const Q = st.q, G = st.gain;
     const { C1, C2 } = equalCaps(ctx, ctx.c0 * BP_CAP_FACTOR);
     const bound = Q * Q * (C1 + C2) / C1;
-    const refuse = { error: `Band-pass gain must be < ${bound.toFixed(2)} for Q = ${Q.toFixed(2)}`, bound };
+    const refuse = { error: `Band-pass gain must be < ${bound.toFixed(2)} for Q = ${Q.toFixed(2)}` };
     if (!(G > 0) || !(G < bound)) return refuse;
     const R2 = ctx.roundR(Q * (C1 + C2) / (w0 * C1 * C2));
     const R1 = ctx.roundR(R2 * C2 / (G * (C1 + C2)));
@@ -879,37 +883,29 @@
     return { parts: { R1, R2, R3, C1, C2 }, gainActual: R2 * C2 / (R1 * (C1 + C2)) };
   }
 
-  // ---- MFB band-pass (inverting; gain is the centre-frequency gain) ----------
-  function solveMfbBandPass(ctx) {
-    return mfbBandPassSection(ctx, ctx.st.gain);
-  }
-
-  // ---- Notch -------------------------------------------------------------------
-  // One fixed topology: the MFB band-pass section above at centre gain 1, then
-  // an inverting summer that adds the input and the band-pass output:
-  //   R4 from the input to the summer's inverting input (node S),
-  //   R5 from the band-pass output to S, R6 from S to the output.
-  //   v_out = −R6·(v_in/R4 + v_bp/R5)
-  // The band-pass is v_bp = −v_in·(s·ω0/Q)/D(s), D = s² + s·ω0/Q + ω0², so
-  // with R4 = R5:
-  //   H(s) = −(R6/R4)·(D(s) − s·ω0/Q)/D(s) = −(R6/R4)·(s² + ω0²)/D(s)
-  // The notch depth depends on R4 = R5 and the band-pass gain being exactly 1.
-  // R4 = R5 = round(seed); R6 = round(G·seed) sets the passband gain (G = 1:
-  // all three equal). Provisional until spec check 4.
-  // Band-pass gain 1 needs 1 < Q²·(C1+C2)/C1, i.e. Q > 1/√2 for equal caps.
+  // ---- Notch: Fliege, one section --------------------------------------------
+  // FilterPro's drawing, nodes in, B, E, F, G, out:
+  //   C1 in–B with R1 in–B (in parallel), R2 B–gnd,
+  //   op amp 1: + = B, − = F, output = out
+  //   R3 B–E, C2 E–F, op amp 2: + = G, − = F, output = E
+  //   R4 F–out, R5 out–G, R6 G–in
+  // Design (C1 = C2 = C, R3 = R4 = R5 = R6 = R):
+  //   f0 = 1/(2π·R·C)          R1 = R2 = 2·Q·R          unity gain
+  //   H(s) = (s² + ω0²)/(s² + s·ω0/Q + ω0²)
+  // Default C = round(NOTCH_CAP_FACTOR·C0), capped at 1uF. R and the Q pair
+  // are each rounded from the exact R (not from the rounded one).
+  // Entered caps: one typed is used for both; two that differ are kept as
+  // typed and R is solved from √(C1·C2) (our rule; FilterPro's is unknown).
+  // Any Q works: no refusal. The Gain column is not used.
   function solveNotch(ctx) {
-    const { st } = ctx;
-    const G = st.gain;
-    if (!(G > 0)) return { error: `Gain must be > 0 (got ${G})` };
-    const sec = mfbBandPassSection(ctx, 1);
-    if (sec.error) {
-      const { C1, C2 } = equalCaps(ctx, ctx.c0 * BP_CAP_FACTOR);
-      const qMin = Math.sqrt(C1 / (C1 + C2));
-      return { error: `Notch Q must be > ${qMin.toFixed(2)} (got ${st.q.toFixed(2)})` };
-    }
-    const R4 = ctx.roundR(ctx.seed);
-    const parts = Object.assign(sec.parts, { R4, R5: R4, R6: ctx.roundR(G * ctx.seed) });
-    return { parts, gainActual: parts.R6 / R4 };
+    const { st, entry, w0 } = ctx;
+    const typed = entry.c1 != null ? entry.c1 : entry.c2;
+    const C1 = typed != null ? typed : ctx.roundC(Math.min(NOTCH_CAP_FACTOR * ctx.c0, MAX_CAP));
+    const C2 = entry.c2 != null ? entry.c2 : C1;
+    const Rexact = 1 / (w0 * Math.sqrt(C1 * C2));
+    const R = ctx.roundR(Rexact);
+    const Rq = ctx.roundR(2 * st.q * Rexact);
+    return { parts: { R1: Rq, R2: Rq, R3: R, R4: R, R5: R, R6: R, C1, C2 }, gainActual: 1 };
   }
 
   window.FH.solve = { stage, skMinRatio, gainDiffers };
@@ -935,11 +931,10 @@
   //   elements: [type, nodeA, nodeB, value], type 'R' (ohms) or 'C' (farads)
   //   opamp:    { plus, minus, out }: a voltage source out = A·(v+ − v−)
   //             (or opamps: [ ... ] for a two-op-amp stage; the notch)
-  //   inverting: true when the passband gain is negative (MFB, notch)
+  //   inverting: true when the passband gain is negative (MFB)
   // Nodes: 'in' is driven with 1 V, 'gnd' is 0 V, everything else is solved
   // for; the stage output is always 'out'. Shared names: in, n1, n2, out
-  // (n3 for the SK gain divider and the notch summer, bp for the notch's
-  // band-pass output).
+  // (n3 for the SK gain divider; the notch uses FilterPro's B, E, F, G).
   // Part names are FilterPro's: MFB LP C1 = feedback, C2 = to ground;
   // SK LP C1 = to ground, C2 = feedback; MFB HP C1 = input, C2 = feedback,
   // C3 = series to the − input, R1 = feedback, R2 = shunt; SK HP C1 = input,
@@ -1017,20 +1012,20 @@
       opamp: { plus: 'gnd', minus: 'n2', out: 'out' },
       inverting: true,
     }),
-    // Notch: the MFB band-pass above with its output at 'bp', then an
-    // inverting summer: R4 in→n3, R5 bp→n3, R6 n3→out, + input grounded.
-    // Passband gain −R6/R4.
+    // Fliege notch (FilterPro's drawing): C1 and R1 in parallel in→B, R2 B→gnd,
+    // R3 B→E, C2 E→F, R4 F→out, R5 out→G, R6 G→in. Op amp 1: + B, − F,
+    // output out. Op amp 2: + G, − F, output E. Non-inverting, unity gain.
     notch: p => ({
       elements: [
-        ['R', 'in', 'n1', p.R1], ['R', 'n1', 'gnd', p.R3], ['C', 'n1', 'bp', p.C1],
-        ['C', 'n1', 'n2', p.C2], ['R', 'n2', 'bp', p.R2],
-        ['R', 'in', 'n3', p.R4], ['R', 'bp', 'n3', p.R5], ['R', 'n3', 'out', p.R6],
+        ['C', 'in', 'B', p.C1], ['R', 'in', 'B', p.R1], ['R', 'B', 'gnd', p.R2],
+        ['R', 'B', 'E', p.R3], ['C', 'E', 'F', p.C2],
+        ['R', 'F', 'out', p.R4], ['R', 'out', 'G', p.R5], ['R', 'G', 'in', p.R6],
       ],
       opamps: [
-        { plus: 'gnd', minus: 'n2', out: 'bp' },
-        { plus: 'gnd', minus: 'n3', out: 'out' },
+        { plus: 'B', minus: 'F', out: 'out' },
+        { plus: 'G', minus: 'F', out: 'E' },
       ],
-      inverting: true,
+      inverting: false,
     }),
   };
 
@@ -1050,7 +1045,7 @@
   }
 
   // Solve M·x = b in place by Gaussian elimination with partial pivoting.
-  // At most 4 unknowns here, so no cleverness needed.
+  // At most 5 unknowns here (the notch), so no cleverness needed.
   function solveLinear(M, b) {
     const n = b.length;
     for (let col = 0; col < n; col++) {
@@ -1237,7 +1232,7 @@
       showReal: s.showReal === true,
       entries: {},
     };
-    const maxPoles = out.passband === 'bp' ? 5 : 10;
+    const maxPoles = out.passband === 'bp' || out.passband === 'notch' ? 5 : 10; // sections
     out.poles = Math.round(pickClamped(s.poles, 1, maxPoles, d.poles));
     if (out.passband === 'bp') out.circuit = 'mfb';
 
@@ -1422,7 +1417,7 @@
   function summaryText(solvedList) {
     const gain = 'Passband Gain of ' + gainText(totalGain(solvedList));
     const q = 'Q of ' + plain(state.bpQ);
-    if (state.passband === 'notch') return `Notch: ${hzText(state.fc)} Center, ${q}, ${gain}`;
+    if (state.passband === 'notch') return `${state.poles}-Section Notch: ${hzText(state.fc)} Center, ${q}, ${gain}`;
     if (state.passband === 'bp') {
       const n = state.poles;
       return `MFB, ${n}-Section Band-Pass: ${hzText(state.fc)} Center, ${q}, ${gain}`;
@@ -1434,8 +1429,7 @@
   }
 
   // ---- Schematics -----------------------------------------------------------------
-  // One drawing per stage, left to right, three to a row (the notch, with two
-  // op amps, takes two cells). Each topology has one draw function; the part
+  // One drawing per stage, left to right, three to a row. Each topology has one draw function; the part
   // names in it follow FH.response.NETLISTS, so the drawing is the circuit the
   // maths solves. Where one shape serves several circuits (MFB LP/HP/BP, SK
   // LP/HP, real LP/HP) a slot table says which part sits where.
@@ -1479,7 +1473,7 @@
     const value = formatEng(p[name], 3);
     if (side === 'above') out.push(stext(cx, cy - 8, 'middle', `${name} ${value}`));
     else if (side === 'below') out.push(stext(cx, cy + 15, 'middle', `${name} ${value}`));
-    else {
+    else if (side !== 'none') {   // 'none': the caller places the label
       const x = side === 'left' ? cx - 8 : cx + 8, anchor = side === 'left' ? 'end' : 'start';
       out.push(stext(x, cy - 1, anchor, name), stext(x, cy + 8, anchor, value));
     }
@@ -1543,8 +1537,7 @@
   // MFB (low-pass, high-pass and band-pass share one shape): input part
   // in -> n1, shunt part n1 to ground, outer feedback n1 -> out, series part
   // n1 -> n2 (− input), inner feedback n2 -> out. + input grounded.
-  // oy shifts it down (the notch uses it with a bus above); returns the
-  // drawing and its output point.
+  // oy shifts it down; returns the drawing and its output point.
   const MFB_SLOTS = {
     lp: { input: 'R1', shunt: 'C2', outer: 'R2', series: 'R3', inner: 'C1' },
     hp: { input: 'C1', shunt: 'R2', outer: 'C2', series: 'C3', inner: 'R1' },
@@ -1571,20 +1564,46 @@
     return m.svg + sw(m.out, [160, m.out[1]]);
   }
 
-  // Notch: the MFB band-pass (output 'bp'), then an inverting summer:
-  // R4 in -> n3 (over the top), R5 bp -> n3, R6 n3 -> out. + input grounded.
+  // Op amp facing left: inputs on the right edge at x, output on the left.
+  function opampLeft(x, yc, plusOnTop) {
+    const [top, bottom] = plusOnTop ? ['+', '−'] : ['−', '+'];
+    return {
+      svg: `<polygon points="${x},${yc - 18} ${x - 30},${yc} ${x},${yc + 18}" fill="#fff" stroke="#000"/>` +
+        stext(x - 6, yc - 5, 'middle', top) + stext(x - 6, yc + 11, 'middle', bottom),
+      top: [x, yc - 8], bottom: [x, yc + 8], out: [x - 30, yc],
+    };
+  }
+
+  // Fliege notch, laid out like FilterPro's drawing (nodes as in NETLISTS.notch):
+  // C1 over R1 from the input to B, R2 B to ground, B to op amp 1 (+, top);
+  // R3 down from B to E, the output of op amp 2 (facing left, bottom middle);
+  // C2 from E up to F, the joined − inputs; R4 F to the output; R5 down the
+  // right side to G (op amp 2 +); R6 along the bottom from G back to the input.
   function drawNotch(p) {
-    const m = mfb(p, MFB_SLOTS.bp, 14), bp = m.out, n3x = 210, u = opamp(220, bp[1] + 8, false), outX = 264;
-    return '<g transform="translate(6,0)">' + [
-      m.svg, sdot(2, 84),
-      sw([2, 84], [2, 8], [n3x, 8]), part(p, 'R4', [n3x, 8], [n3x, 70], 'right'),
-      sw([n3x, 70], [n3x, bp[1]]), sdot(n3x, 70), sdot(n3x, bp[1]),
-      part(p, 'R5', bp, [n3x, bp[1]], 'above'),
-      sw([n3x, bp[1]], u.top), u.svg,
-      sw(u.bottom, [216, u.bottom[1]], [216, u.bottom[1] + 8]), ground(216, u.bottom[1] + 8),
-      part(p, 'R6', [n3x, 70], [outX, 70], 'above'), sw([outX, 70], [outX, u.out[1]]),
-      sw(u.out, [280, u.out[1]]), sdot(outX, u.out[1]),
-    ].join('') + '</g>';
+    const yT = 18, yR1 = 40, yF = 62, yE = 90, yG = 98, yR6 = 112;
+    const inX = 4, bX = 44, r3X = 58, eTap = 70, fX = 100, f2X = 122, outX = 156;
+    const u1 = opamp(112, 26, true);           // + (112,18), − (112,34), out (142,26)
+    const u2 = opampLeft(118, yE, false);      // − (118,82), + (118,98), out E (88,90)
+    const cx2 = (eTap + fX) / 2;
+    return [
+      sw([0, yT], [inX, yT]), sdot(inX, yT), sw([inX, yT], [inX, yR6]), sdot(inX, yR1),
+      part(p, 'C1', [inX, yT], [bX, yT], 'above'), sdot(bX, yT),
+      part(p, 'R1', [inX, yR1], [bX, yR1], 'above'),
+      sw([bX, yT], [bX, yR1]), sdot(bX, yR1),
+      part(p, 'R2', [bX, yR1], [bX, 76], 'left'), ground(bX, 76),
+      sw([bX, yT], u1.top), sdot(r3X, yT), u1.svg,
+      part(p, 'R3', [r3X, yT], [r3X, 46], 'right'), sw([r3X, 46], [r3X, yE], u2.out), u2.svg,
+      sdot(eTap, yE), sw([eTap, yE], [eTap, yF]),
+      // C2: value above, name below (the space above is shared with R3's label)
+      part(p, 'C2', [eTap, yF], [fX, yF], 'none'),
+      stext(cx2, yF - 9, 'middle', formatEng(p.C2, 3)), stext(cx2, yF + 15, 'middle', 'C2'),
+      sdot(fX, yF), sw([fX, yF], [fX, u1.bottom[1]], u1.bottom),
+      sw([fX, yF], [f2X, yF]), sdot(f2X, yF), sw([f2X, yF], [f2X, u2.top[1]], u2.top),
+      part(p, 'R4', [f2X, yF], [outX, yF], 'above'),
+      sw(u1.out, [162, u1.out[1]]), sdot(outX, u1.out[1]), sw([outX, u1.out[1]], [outX, yF]), sdot(outX, yF),
+      part(p, 'R5', [outX, yF], [outX, yG], 'left'), sdot(outX, yG), sw([outX, yG], u2.bottom),
+      sw([outX, yG], [outX, yR6]), part(p, 'R6', [outX, yR6], [inX, yR6], 'above'),
+    ].join('');
   }
 
   // Which drawing a solved stage gets (same keys as FH.response.NETLISTS).
@@ -1597,27 +1616,24 @@
   }
 
   const captionFor = st =>
-    st.role === 'notch' ? 'Notch Section' : st.kind === 'real' ? 'Real Pole Section' : `Section ${st.label}`;
+    st.kind === 'real' ? 'Real Pole Section' : `Section ${st.label}`;
 
   // Draws into #schematics: one SVG per stage, with its caption under it.
   // A stage that could not be solved gets a small box saying so.
   function renderSchematics(solvedList) {
     $('schematics').innerHTML = solvedList.map(s => {
-      const notch = s.stage.role === 'notch';
-      const w = notch ? 2 * CELL.w : CELL.w;
-      const h = notch ? CELL.h + 14 : CELL.h;
-      const drawH = h - (CELL.h - CELL.drawH);
+      const w = CELL.w, h = CELL.h, drawH = CELL.drawH;
       let body;
       if (s.error) {
         body = `<rect x="34" y="34" width="100" height="40" fill="#fff" stroke="#000"/>` +
           stext(84, 58, 'middle', 'see message');
       } else {
-        body = `<rect x="0" y="0" width="${notch ? 292 : 164}" height="${drawH}" fill="#fff"/>` + drawStage(s);
+        body = `<rect x="0" y="0" width="164" height="${drawH}" fill="#fff"/>` + drawStage(s);
       }
       return `<svg class="sch" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" ` +
         `font-family="Arial, Helvetica, sans-serif" font-size="9" role="img" ` +
         `aria-label="${esc(captionFor(s.stage))} schematic">` + body +
-        `<text x="${notch ? 146 : 82}" y="${h - 4}" text-anchor="middle" font-size="12">` +
+        `<text x="82" y="${h - 4}" text-anchor="middle" font-size="12">` +
         `${esc(captionFor(s.stage))}</text></svg>`;
     }).join('');
   }
@@ -1813,8 +1829,9 @@
       'Q sets the bandwidth of each section (bandwidth = center / Q). The sections are identical MFB band-pass ' +
       'stages in cascade: more sections give steeper skirts and a narrower overall band.',
     notch: 'A notch (band-reject) filter removes a narrow band centred on Center Freq. and passes the rest. ' +
-      'Q sets the notch width (width = center / Q). It is built from an MFB band-pass section whose output ' +
-      'is subtracted from the input by a summing amplifier; Gain sets the summer gain.',
+      'Q sets the notch width (width = center / Q). Each section is a two-op-amp Fliege notch at unity gain: ' +
+      'C1 = C2 = C and R3 to R6 = R set the frequency (f0 = 1/(2πRC)); R1 = R2 = 2·Q·R set the width. ' +
+      'Sections are identical and in cascade: more sections give a wider, deeper notch.',
   };
 
   function description() {
@@ -1827,7 +1844,8 @@
   //   SK LP:            C1 = to ground (at the + input), C2 = feedback
   //   MFB HP:           C1 = input, C2 = feedback (gain = C1/C2), C3 = series to the inverting input
   //   SK HP:            C1 = input, C2 = second series cap (to the + input)
-  //   BP and notch:     C1 = feedback, C2 = to the inverting input
+  //   BP:               C1 = feedback, C2 = to the inverting input
+  //   Notch (Fliege):   C1 = input cap across R1, C2 = op amp 2 output to the − inputs (C1 = C2)
   //   Real pole:        C1 = to ground (LP) or series input cap (HP)
   function capRole(st, part) {
     if (st.kind === 'real') {
@@ -1842,13 +1860,13 @@
             c3: 'the series capacitor to the inverting input' }
         : { c1: 'the input capacitor', c2: 'the second series capacitor, to the + input' },
       bp: { c1: 'the feedback capacitor', c2: 'the capacitor to the inverting input' },
-      notch: { c1: 'the band-pass feedback capacitor', c2: 'the band-pass capacitor to the inverting input' },
+      notch: { c1: 'the input capacitor, across R1 (C1 = C2: one typed value is used for both)',
+               c2: 'the capacitor from op amp 2\'s output to the inverting inputs (C1 = C2: one typed value is used for both)' },
     };
     return roles[st.role][part];
   }
 
   function gainHint(st) {
-    if (st.role === 'notch') return 'Gain sets the passband gain of the notch\'s summing amplifier. Blank means 1.';
     if (st.role === 'bp') return 'Gain is the section\'s gain at the center frequency. Blank uses the default, equal to Q.';
     if (state.circuit === 'sk') return 'Gain is this stage\'s passband gain. Sallen-Key needs 1 or more. Blank means 1.';
     if (st.role === 'hp') return 'Gain is this stage\'s passband gain, set by C1/C2. Blank means 1.';
@@ -1901,7 +1919,7 @@
   // Show the state in the controls, and show/hide/enable per passband.
   //   LP/HP:  Circuit Type, Poles + Cutoff, Filter Type (Ripple for Chebyshev only)
   //   BP:     Sections + Q + Center Freq; no Circuit Type (MFB only), no Filter Type
-  //   Notch:  Q + Center Freq only
+  //   Notch:  Sections + Q + Center Freq (like BP)
   function syncControls() {
     const pb = state.passband;
     const band = pb === 'bp' || pb === 'notch';
@@ -1914,9 +1932,7 @@
     $('fr-circuit').classList.toggle('hidden', band);
     $('fr-filter').classList.toggle('hidden', band);
     $('band-caption').textContent = PASSBAND_NAMES[pb];
-    $('lbl-poles').textContent = pb === 'bp' ? 'Sections' : 'Poles';
-    $('lbl-poles').classList.toggle('hidden', pb === 'notch');
-    $('poles').classList.toggle('hidden', pb === 'notch');
+    $('lbl-poles').textContent = band ? 'Sections' : 'Poles';
     $('lbl-q').classList.toggle('hidden', !band);
     $('bpQ').classList.toggle('hidden', !band);
     $('lbl-fc').textContent = band ? 'Center Freq.' : 'Cutoff Freq.';
@@ -1938,7 +1954,7 @@
 
   // Optional Entry grid: a cell is enabled only where the stage has that part.
   //   Rows A-E and Real follow the stages that exist.
-  //   Real: C1 only.  C3: MFB high-pass only.  Gain: every pair stage (incl. BP, notch).
+  //   Real: C1 only.  C3: MFB high-pass only.  Gain: every pair stage except the notch (unity only).
   // Entered caps are shown with formatEng (4.70n); gains as plain numbers
   // (0.5, not 500m). Empty cells use the computed part.
   function syncGrid() {
@@ -1958,6 +1974,7 @@
     if (!st) return false;
     if (st.kind === 'real') return part === 'c1';
     if (part === 'c3') return st.role === 'hp' && state.circuit === 'mfb';
+    if (part === 'gain') return st.role !== 'notch';
     return true;
   }
 
@@ -1998,9 +2015,9 @@
   $('passband').addEventListener('change', e => {
     const next = { ...state, passband: e.target.value };
     let notice = null;
-    if (next.passband === 'bp' && state.poles > 5) {
+    if ((next.passband === 'bp' || next.passband === 'notch') && state.poles > 5) {
       next.poles = 5;
-      notice = 'Band-Pass allows 1 to 5 sections, so Sections is now 5.';
+      notice = `${PASSBAND_NAMES[next.passband]} allows 1 to 5 sections, so Sections is now 5.`;
     }
     commit(next, e.target, notice);
   });
@@ -2017,7 +2034,8 @@
   };
 
   const TEXT_FIELDS = {
-    poles: () => (state.passband === 'bp' ? inRange('Sections', 1, 5, true) : inRange('Poles', 1, 10, true)),
+    poles: () => (state.passband === 'bp' || state.passband === 'notch'
+      ? inRange('Sections', 1, 5, true) : inRange('Poles', 1, 10, true)),
     bpQ: () => inRange('Q', 0.5, 100, false),
     fc: () => positiveEng(state.passband === 'bp' || state.passband === 'notch' ? 'Center Freq.' : 'Cutoff Freq.', '1k or 2k2'),
     rippleDb: () => inRange('Ripple (dB)', 0.01, 3, false),

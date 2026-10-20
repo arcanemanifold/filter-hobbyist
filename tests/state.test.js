@@ -60,6 +60,7 @@ test('clamps poles, ripple, bpQ', () => {
   assert.strictEqual(n({ poles: 99 }).poles, 10);
   assert.strictEqual(n({ poles: 0 }).poles, 1);
   assert.strictEqual(n({ poles: 99, passband: 'bp' }).poles, 5);
+  assert.strictEqual(n({ poles: 99, passband: 'notch' }).poles, 5);
   assert.strictEqual(n({ poles: 2.6 }).poles, 3);
   assert.strictEqual(n({ rippleDb: 0 }).rippleDb, 0.01);
   assert.strictEqual(n({ rippleDb: 9 }).rippleDb, 3);

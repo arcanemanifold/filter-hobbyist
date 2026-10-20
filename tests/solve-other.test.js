@@ -161,7 +161,7 @@ test('notch depth', () => {
   assert.strictEqual(r.error, null, r.error);
   const db = 20 * Math.log10(mag(H(r, st.fn)));
   assert.ok(db < -60, `|H(f0)| = ${db.toFixed(1)} dB`);
-  // Passband gain 1 (inverting summer, equal resistors).
+  // Passband gain 1 (Fliege: unity at DC and at high frequency).
   assertClose(mag(H(r, st.fn / 1e3)), 1, 1e-4, 'LF gain');
   assertClose(mag(H(r, st.fn * 1e3)), 1, 1e-4, 'HF gain');
 });
@@ -186,9 +186,9 @@ test('refusals state the bound', () => {
   const e = solve(bpHot, 'mfb');
   assert.strictEqual(e.parts, null);
   assert.strictEqual(e.error, 'Band-pass gain must be < 8.00 for Q = 2.00');
-  // Notch: the band-pass section runs at gain 1, so Q must exceed 1/√2.
+  // Notch: the Fliege notch has no Q floor (round 2), so Q 0.5 solves.
   const notch = { label: 'A', role: 'notch', kind: 'pair', fn: 1000, q: 0.5, gain: 1 };
-  assert.strictEqual(solve(notch, 'mfb').error, 'Notch Q must be > 0.71 (got 0.50)');
+  assert.strictEqual(solve(notch, 'mfb').error, null);
   // Caps above 1uF, including MFB HP C3.
   const a = byLabel(build(state()), 'A');
   assert.strictEqual(solve(a, 'mfb', { c3: 2e-6 }).error, 'Capacitors are not supported above 1uF.');
@@ -343,4 +343,59 @@ test('SK HP gain > 1: exact pair from the quadratic, each rounded on its own', (
   for (const k of ['R1', 'R2']) {
     assert.strictEqual(e96.parts[k], FH.units.roundToSeries(exact.parts[k], 'E96'), k);
   }
+});
+
+// ---- Round 2: Fliege notch (notch test 1p) ------------------------------------
+const notchStage = (q = 10) => ({ label: 'A', role: 'notch', kind: 'pair', fn: 1000, q, gain: 1 });
+
+test('golden: Fliege notch, 1 section, 1 kHz, Q 10, E96/E6, seed 10k', () => {
+  const r = solve(notchStage(), 'mfb', {}, { capSeries: 'E6' });
+  assert.strictEqual(r.error, null, r.error);
+  const want = { C1: '47.0n', C2: '47.0n', R1: '68.1k', R2: '68.1k', R3: '3.40k', R4: '3.40k', R5: '3.40k', R6: '3.40k' };
+  for (const [k, v] of Object.entries(want)) assert.strictEqual(formatEng(r.parts[k]), v, k);
+  assert.strictEqual(r.gainActual, 1);
+  const db = f => 20 * Math.log10(mag(H(r, f)));
+  assert.ok(Math.abs(db(1000) - -21.9) <= 0.1, `1 kHz ${db(1000)}`);
+  assert.ok(db(995.96) < -40, `null ${db(995.96)}`);
+});
+
+test('Fliege notch netlist matches FilterPro\'s drawing', () => {
+  const p = { R1: 1, R2: 2, R3: 3, R4: 4, R5: 5, R6: 6, C1: 7, C2: 8 };
+  const net = R.NETLISTS.notch(p);
+  const at = {};
+  for (const [, a, b, v] of net.elements) at[Object.keys(p).find(k => p[k] === v)] = [a, b].join('-');
+  assert.deepStrictEqual(at, {
+    C1: 'in-B', R1: 'in-B', R2: 'B-gnd', R3: 'B-E', C2: 'E-F', R4: 'F-out', R5: 'out-G', R6: 'G-in',
+  });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(net.opamps)), [
+    { plus: 'B', minus: 'F', out: 'out' },
+    { plus: 'G', minus: 'F', out: 'E' },
+  ]);
+  assert.strictEqual(net.inverting, false);
+});
+
+test('notch caps: one entered is used for both; two different use √(C1·C2) for R', () => {
+  const one = solve(notchStage(), 'mfb', { c2: 22e-9 });
+  assert.strictEqual(one.error, null, one.error);
+  assert.deepStrictEqual([one.parts.C1, one.parts.C2], [22e-9, 22e-9]);
+  const two = solve(notchStage(), 'mfb', { c1: 22e-9, c2: 47e-9 }, { resSeries: 'Exact' });
+  assert.deepStrictEqual([two.parts.C1, two.parts.C2], [22e-9, 47e-9]); // kept as typed
+  const R = 1 / (2 * Math.PI * 1000 * Math.sqrt(22e-9 * 47e-9));
+  assertClose(two.parts.R3, R, 1e-12, 'R from √(C1·C2)');
+  assertClose(two.parts.R1, 2 * 10 * R, 1e-12, 'R1 = 2QR');
+});
+
+test('notch default C is capped at 1uF at low frequency', () => {
+  const r = solve(Object.assign(notchStage(), { fn: 1 }), 'mfb');
+  assert.strictEqual(r.error, null, r.error);
+  assert.strictEqual(r.parts.C1, 1e-6);
+  assert.strictEqual(r.parts.C2, 1e-6);
+});
+
+test('notch sections chain: 3 identical sections deepen the skirt', () => {
+  const sts = build(state({ passband: 'notch', poles: 3 }));
+  assert.strictEqual(sts.length, 3);
+  const list = sts.map(st => solve(st, 'mfb', {}, { capSeries: 'E6' }));
+  const one = R.point(list.slice(0, 1), 1000, null).db, three = R.point(list, 1000, null).db;
+  assert.ok(Math.abs(three - 3 * one) < 1e-9, `${three} vs 3 × ${one}`);
 });

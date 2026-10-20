@@ -35,11 +35,16 @@ test('BP 4 sections, Q 10', () => {
   });
 });
 
-test('Notch is one stage', () => {
-  const s = st({ passband: 'notch' });
-  assert.strictEqual(s.length, 1);
-  assert.strictEqual(s[0].role, 'notch'); assert.strictEqual(s[0].label, 'A');
-  near(s[0].fn, 1000, 'fn'); assert.strictEqual(s[0].q, 10); assert.strictEqual(s[0].gain, 1);
+// Round 2: notch Poles = section count (1-5), like band-pass; unity gain only.
+test('Notch: Poles is the section count, each unity gain', () => {
+  const one = st({ passband: 'notch', poles: 1 });
+  assert.strictEqual(one.length, 1);
+  assert.strictEqual(one[0].role, 'notch'); assert.strictEqual(one[0].label, 'A');
+  near(one[0].fn, 1000, 'fn'); assert.strictEqual(one[0].q, 10); assert.strictEqual(one[0].gain, 1);
+  const three = st({ passband: 'notch', poles: 3, entries: { B: { gain: 5 } } });
+  assert.deepStrictEqual(Array.from(three.map(x => x.label)), ['A', 'B', 'C']);
+  three.forEach(x => { assert.strictEqual(x.role, 'notch'); assert.strictEqual(x.gain, 1); assert.strictEqual(x.q, 10); });
+  assert.strictEqual(st({ passband: 'notch', poles: 9 }).length, 5);
 });
 
 test('gain entries override; Real ignores gain', () => {
