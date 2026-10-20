@@ -75,7 +75,9 @@
   }
   #help.refusal { color: var(--refuse); }
   #graph { left: 212px; top: 0; width: 340px; height: 290px; }
-  #schematics { left: 0; top: 294px; width: 508px; height: 266px; overflow: hidden; }
+  #schematics { left: 0; top: 294px; width: 508px; height: 266px; overflow: hidden;
+                display: flex; flex-wrap: wrap; align-content: flex-start; }
+  #schematics svg { flex: none; display: block; }
 
   /* Right column: Settings panel, then the results table. */
   #settings { left: 554px; top: 7px; width: 322px; height: 290px; }
@@ -1366,7 +1368,194 @@
       `${hzText(state.fc)} Cutoff, ${gain}`;
   }
 
-  function renderSchematics(solvedList) { /* Task 11: one SVG per stage */ }
+  // ---- Schematics -----------------------------------------------------------------
+  // One drawing per stage, left to right, three to a row (the notch, with two
+  // op amps, takes two cells). Each topology has one draw function; the part
+  // names in it follow FH.response.NETLISTS, so the drawing is the circuit the
+  // maths solves. Where one shape serves several circuits (MFB LP/HP/BP, SK
+  // LP/HP, real LP/HP) a slot table says which part sits where.
+  // Coordinates are SVG pixels, y down. Signal flows left to right.
+
+  const CELL = { w: 168, h: 133, drawH: 116, captionY: 129 };
+
+  // Shared primitives. Points are [x, y].
+  const sw = (...pts) => `<polyline points="${pts.map(p => p.join(',')).join(' ')}" fill="none" stroke="#000"/>`;
+  const sdot = (x, y) => `<circle cx="${x}" cy="${y}" r="1.8" fill="#000"/>`;
+  const stext = (x, y, anchor, t) => `<text x="${x}" y="${y}" text-anchor="${anchor}">${esc(t)}</text>`;
+
+  // Ground symbol hanging below (x, y).
+  const ground = (x, y) =>
+    sw([x - 6, y], [x + 6, y]) + sw([x - 4, y + 3], [x + 4, y + 3]) + sw([x - 2, y + 6], [x + 2, y + 6]);
+
+  // A resistor or capacitor (by the first letter of its name) between a and b,
+  // which share an x or a y. side = where the label goes: 'above' / 'below'
+  // (one line "R1 10.0k") or 'left' / 'right' (name over value).
+  function part(p, name, a, b, side) {
+    const horiz = a[1] === b[1];
+    const [cx, cy] = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    const isR = name[0] === 'R';
+    const half = isR ? 10 : 2;                      // body half-length along the wire
+    const [lo, hi] = horiz ? [Math.min(a[0], b[0]), Math.max(a[0], b[0])] : [Math.min(a[1], b[1]), Math.max(a[1], b[1])];
+    const out = horiz
+      ? [sw([lo, cy], [cx - half, cy]), sw([cx + half, cy], [hi, cy])]
+      : [sw([cx, lo], [cx, cy - half]), sw([cx, cy + half], [cx, hi])];
+    if (isR) {  // zigzag, 6 half-waves
+      const pts = [];
+      for (let i = 0; i <= 6; i++) {
+        const along = -10 + i * 20 / 6, across = i === 0 || i === 6 ? 0 : (i % 2 ? -3 : 3);
+        pts.push(horiz ? [cx + along, cy + across] : [cx + across, cy + along]);
+      }
+      out.push(`<polyline points="${pts.map(q => q.map(v => v.toFixed(1)).join(',')).join(' ')}" fill="none" stroke="#000"/>`);
+    } else {    // two plates
+      out.push(horiz
+        ? sw([cx - 2, cy - 6], [cx - 2, cy + 6]) + sw([cx + 2, cy - 6], [cx + 2, cy + 6])
+        : sw([cx - 6, cy - 2], [cx + 6, cy - 2]) + sw([cx - 6, cy + 2], [cx + 6, cy + 2]));
+    }
+    const value = formatEng(p[name], 3);
+    if (side === 'above') out.push(stext(cx, cy - 8, 'middle', `${name} ${value}`));
+    else if (side === 'below') out.push(stext(cx, cy + 15, 'middle', `${name} ${value}`));
+    else {
+      const x = side === 'left' ? cx - 8 : cx + 8, anchor = side === 'left' ? 'end' : 'start';
+      out.push(stext(x, cy - 1, anchor, name), stext(x, cy + 8, anchor, value));
+    }
+    return `<g data-part="${name}">${out.join('')}</g>`;
+  }
+
+  // Op amp, left edge at x, centred on yc. plusOnTop picks the input order.
+  // Returns the drawing and its pins: top/bottom inputs and the output.
+  function opamp(x, yc, plusOnTop) {
+    const [top, bottom] = plusOnTop ? ['+', '−'] : ['−', '+'];
+    return {
+      svg: `<polygon points="${x},${yc - 18} ${x + 30},${yc} ${x},${yc + 18}" fill="#fff" stroke="#000"/>` +
+        stext(x + 6, yc - 5, 'middle', top) + stext(x + 6, yc + 11, 'middle', bottom),
+      top: [x, yc - 8], bottom: [x, yc + 8], out: [x + 30, yc],
+    };
+  }
+
+  // Real pole: series part into n1, shunt part n1 to ground, unity buffer.
+  //   LP: R1 series, C1 shunt.   HP: C1 series, R1 shunt.
+  const REAL_SLOTS = { lp: { series: 'R1', shunt: 'C1' }, hp: { series: 'C1', shunt: 'R1' } };
+  function drawReal(p, s) {
+    const y = 64, n1 = [48, y], u = opamp(70, 72, true), outX = 120;
+    return [
+      part(p, s.series, [2, y], n1, 'above'), sdot(...n1),
+      part(p, s.shunt, n1, [48, 88], 'left'), ground(48, 88),
+      sw(n1, u.top), u.svg,
+      // − input tied to the output
+      sw(u.bottom, [64, 80], [64, 100], [outX, 100], [outX, 72]),
+      sw(u.out, [160, 72]), sdot(outX, 72),
+    ].join('');
+  }
+
+  // Sallen-Key: two series parts in1 -> n1 -> n2 (+ input), feedback part
+  // n1 -> out, shunt part n2 to ground. − input: tied to the output, or (when
+  // R4 exists) the divider R4 out -> n3, R3 n3 -> ground, gain 1 + R4/R3.
+  const SK_SLOTS = {
+    lp: { s1: 'R1', s2: 'R2', fb: 'C1', shunt: 'C2' },
+    hp: { s1: 'C1', s2: 'C2', fb: 'R1', shunt: 'R2' },
+  };
+  function drawSallenKey(p, s) {
+    const y = 60, n1 = [44, y], n2 = [84, y], u = opamp(100, 68, true), outX = 148, n3 = [94, 100];
+    const out = [
+      part(p, s.s1, [2, y], n1, 'below'), sdot(...n1),
+      part(p, s.s2, n1, n2, 'above'), sdot(...n2),
+      part(p, s.shunt, n2, [84, 86], 'left'), ground(84, 86),
+      sw(n2, u.top), u.svg,
+      sw(n1, [44, 30]), part(p, s.fb, [44, 30], [outX, 30], 'above'), sw([outX, 30], [outX, 68]),
+      sw(u.out, [160, 68]), sdot(outX, 68),
+      sw(u.bottom, [n3[0], 76], n3),
+    ];
+    if (p.R4 != null) {
+      out.push(sdot(...n3),
+        part(p, 'R4', n3, [outX, n3[1]], 'below'), sw([outX, n3[1]], [outX, 68]),
+        part(p, 'R3', [50, n3[1]], n3, 'below'), sw([50, n3[1]], [50, n3[1] + 4]), ground(50, n3[1] + 4));
+    } else {
+      out.push(sw(n3, [outX, n3[1]], [outX, 68]));
+    }
+    return out.join('');
+  }
+
+  // MFB (low-pass, high-pass and band-pass share one shape): input part
+  // in -> n1, shunt part n1 to ground, outer feedback n1 -> out, series part
+  // n1 -> n2 (− input), inner feedback n2 -> out. + input grounded.
+  // oy shifts it down (the notch uses it with a bus above); returns the
+  // drawing and its output point.
+  const MFB_SLOTS = {
+    lp: { input: 'R1', shunt: 'C2', outer: 'R2', series: 'R3', inner: 'C1' },
+    hp: { input: 'C1', shunt: 'R1', outer: 'C3', series: 'C2', inner: 'R2' },
+    bp: { input: 'R1', shunt: 'R3', outer: 'C1', series: 'C2', inner: 'R2' },
+  };
+  function mfb(p, s, oy) {
+    const y = 70 + oy, n1 = [46, y], n2 = [90, y], u = opamp(100, 78 + oy, false), outX = 150;
+    const yOuter = 20 + oy, yInner = 46 + oy, yOut = 78 + oy, yGnd = 96 + oy;
+    const svg = [
+      part(p, s.input, [2, y], n1, 'above'), sdot(...n1),
+      part(p, s.shunt, n1, [n1[0], yGnd], 'right'), ground(n1[0], yGnd),
+      part(p, s.series, n1, n2, 'above'), sdot(...n2),
+      sw(n2, u.top), u.svg,
+      sw(u.bottom, [96, u.bottom[1]], [96, yGnd]), ground(96, yGnd),
+      sw(n1, [n1[0], yOuter]), part(p, s.outer, [n1[0], yOuter], [outX, yOuter], 'above'),
+      sw(n2, [n2[0], yInner]), part(p, s.inner, [n2[0], yInner], [outX, yInner], 'above'),
+      sw([outX, yOuter], [outX, yOut]), sdot(outX, yInner), sdot(outX, yOut),
+      sw(u.out, [outX, yOut]),
+    ].join('');
+    return { svg, out: [outX, yOut] };
+  }
+  function drawMfb(p, s) {
+    const m = mfb(p, s, 0);
+    return m.svg + sw(m.out, [160, m.out[1]]);
+  }
+
+  // Notch: the MFB band-pass (output 'bp'), then an inverting summer:
+  // R4 in -> n3 (over the top), R5 bp -> n3, R6 n3 -> out. + input grounded.
+  function drawNotch(p) {
+    const m = mfb(p, MFB_SLOTS.bp, 14), bp = m.out, n3x = 210, u = opamp(220, bp[1] + 8, false), outX = 264;
+    return '<g transform="translate(6,0)">' + [
+      m.svg, sdot(2, 84),
+      sw([2, 84], [2, 8], [n3x, 8]), part(p, 'R4', [n3x, 8], [n3x, 70], 'right'),
+      sw([n3x, 70], [n3x, bp[1]]), sdot(n3x, 70), sdot(n3x, bp[1]),
+      part(p, 'R5', bp, [n3x, bp[1]], 'above'),
+      sw([n3x, bp[1]], u.top), u.svg,
+      sw(u.bottom, [216, u.bottom[1]], [216, u.bottom[1] + 8]), ground(216, u.bottom[1] + 8),
+      part(p, 'R6', [n3x, 70], [outX, 70], 'above'), sw([outX, 70], [outX, u.out[1]]),
+      sw(u.out, [280, u.out[1]]), sdot(outX, u.out[1]),
+    ].join('') + '</g>';
+  }
+
+  // Which drawing a solved stage gets (same keys as FH.response.NETLISTS).
+  function drawStage(s) {
+    const st = s.stage, p = s.parts;
+    if (st.role === 'notch') return drawNotch(p);
+    if (st.role === 'bp') return drawMfb(p, MFB_SLOTS.bp);
+    if (st.kind === 'real') return drawReal(p, REAL_SLOTS[st.role]);
+    return s.circuit === 'mfb' ? drawMfb(p, MFB_SLOTS[st.role]) : drawSallenKey(p, SK_SLOTS[st.role]);
+  }
+
+  const captionFor = st =>
+    st.role === 'notch' ? 'Notch Section' : st.kind === 'real' ? 'Real Pole Section' : `Section ${st.label}`;
+
+  // Draws into #schematics: one SVG per stage, with its caption under it.
+  // A stage that could not be solved gets a small box saying so.
+  function renderSchematics(solvedList) {
+    $('schematics').innerHTML = solvedList.map(s => {
+      const notch = s.stage.role === 'notch';
+      const w = notch ? 2 * CELL.w : CELL.w;
+      const h = notch ? CELL.h + 14 : CELL.h;
+      const drawH = h - (CELL.h - CELL.drawH);
+      let body;
+      if (s.error) {
+        body = `<rect x="34" y="34" width="100" height="40" fill="#fff" stroke="#000"/>` +
+          stext(84, 58, 'middle', 'see message');
+      } else {
+        body = `<rect x="0" y="0" width="${notch ? 292 : 164}" height="${drawH}" fill="#fff"/>` + drawStage(s);
+      }
+      return `<svg class="sch" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" ` +
+        `font-family="Arial, Helvetica, sans-serif" font-size="9" role="img" ` +
+        `aria-label="${esc(captionFor(s.stage))} schematic">` + body +
+        `<text x="${notch ? 146 : 82}" y="${h - 4}" text-anchor="middle" font-size="12">` +
+        `${esc(captionFor(s.stage))}</text></svg>`;
+    }).join('');
+  }
 
   // build -> solve each stage -> render. Also saves the state.
   function recompute() {
