@@ -82,6 +82,9 @@
   #results  { left: 512px; top: 300px; width: 364px; height: 180px; }
   #summary  { left: 524px; top: 452px; width: 340px; height: 32px; text-align: center; line-height: 15px; }
   #phase-note { left: 560px; top: 490px; width: 280px; color: #e00000; text-align: center; line-height: 15px; }
+  /* Op-amp GBW overlay controls, where FilterPro had Plot Chart / Decades. */
+  #real-panel { left: 560px; top: 528px; width: 300px; height: 24px; }
+  #real-panel > * { position: absolute; }
 
   /* Optional Entry grid column headers are centred over their boxes. */
   .colhead { width: 46px; text-align: center; }
@@ -210,6 +213,13 @@
   <div id="results" class="abs"></div>
   <div id="summary" class="abs"></div>
   <div id="phase-note" class="abs">* Note: Phase response is not corrected 180° for inverting stages.</div>
+  <div id="real-panel" class="abs">
+    <span class="lbl" style="left:0; top:5px;">Op-amp GBW</span>
+    <input type="text" id="gbw" aria-label="Op-amp GBW (Hz)" style="left:76px; top:1px; width:50px;">
+    <span class="lbl" style="left:130px; top:5px;">Hz</span>
+    <label class="lbl" style="left:156px; top:5px;"><input type="checkbox" id="showReal"
+      style="margin:0 4px 0 0; vertical-align:-2px;">Show real response</label>
+  </div>
 </div>
 <script>window.FH = {};</script>
 <script data-module="units">
@@ -1356,7 +1366,6 @@
       `${hzText(state.fc)} Cutoff, ${gain}`;
   }
 
-  function renderGraph(solvedList) { /* Task 10: gain / phase / delay plot */ }
   function renderSchematics(solvedList) { /* Task 11: one SVG per stage */ }
 
   // build -> solve each stage -> render. Also saves the state.
@@ -1376,6 +1385,152 @@
     try { history.replaceState(null, '', hash); } catch (e) { location.hash = hash; }
     try { window.localStorage.setItem(FH.state.STORAGE_KEY, JSON.stringify(state)); } catch (e) { /* storage blocked */ }
   }
+
+  // ---- Response graph ---------------------------------------------------------
+  // SVG plot of the cascade from fc/10 to 100·fc (log frequency), FilterPro style:
+  //   gain   green, left axis. Top = passband gain + 10 dB rounded up to 10 dB,
+  //          80 dB span, 10 dB grid.
+  //   phase  red, first right axis, 90° per division. The labels copy FilterPro,
+  //          which labels the top gridline "+380°" although it is +360°.
+  //   delay  black, second right axis, 0 to a "nice" maximum (µs / ms / s).
+  //   cursor blue vertical line at the cursor frequency. Clicking the plot moves it.
+  //   real   dashed green: the gain with a finite-GBW op amp, when "Show real
+  //          response" is ticked and a GBW is entered.
+
+  const G = { w: 340, h: 290, left: 44, right: 266, top: 8, bottom: 264, divs: 8 };
+  const COLOR = { gain: '#007a00', phase: '#d00000', delay: '#000000', cursor: '#0000e0',
+    grid: '#9a9a9a', minor: '#bcbcbc' };
+  const PHASE_LABELS = ['+380°', '+270°', '+180°', '+90°', '0°', '-90°', '-180°', '-270°', '-360°'];
+  const PHASE_TOP = 360, PHASE_SPAN = 720;
+
+  const graphRange = () => ({ fStart: state.fc / 10, fStop: state.fc * 100 });
+  const xOf = (f, r) => G.left + (G.right - G.left) * Math.log(f / r.fStart) / Math.log(r.fStop / r.fStart);
+  const fOf = (x, r) => r.fStart * Math.pow(r.fStop / r.fStart, (x - G.left) / (G.right - G.left));
+  // value -> y, for an axis whose top gridline is `top` and spans `span` over the plot.
+  // Clamped well outside the plot so -Infinity dB never reaches the SVG; the clip hides it.
+  const yOf = (v, top, span) => {
+    const y = G.top + (G.bottom - G.top) * (top - v) / span;
+    return Math.max(G.top - 50, Math.min(G.bottom + 50, Number.isFinite(y) ? y : G.bottom + 50));
+  };
+
+  // Top of the gain axis. Gain within 0.5 dB of a 10 dB step counts as on it,
+  // so a gain of 100 from rounded parts (40.03 dB) still gives 50 dB, not 60.
+  const gainTop = gainDb => Math.ceil((gainDb + 10 - 0.5) / 10) * 10;
+
+  // Delay axis: 8 divisions of a 1 / 2 / 2.5 / 5 step, enough to reach max.
+  function delayStep(maxSec) {
+    const raw = maxSec / G.divs;
+    const decade = Math.pow(10, Math.floor(Math.log10(raw)));
+    const m = [1, 2, 2.5, 5, 10].find(x => x * decade >= raw * (1 - 1e-9));
+    return m * decade;
+  }
+  // 8e-4 -> "800µs", 0.04 -> "40ms", 0 -> "0"
+  const delayText = s => (s === 0 ? '0'
+    : formatEng(s, 3).replace(/^[\d.]+/, t => String(Number(t))).replace('u', 'µ') + 's');
+
+  const pathOf = (pts, x, y) => pts.map((p, i) => (i ? 'L' : 'M') + x(p).toFixed(1) + ',' + y(p).toFixed(1)).join('');
+  const text = (x, y, anchor, color, t) =>
+    `<text x="${x}" y="${y}" text-anchor="${anchor}" fill="${color}">${esc(t)}</text>`;
+  const line = (x1, y1, x2, y2, color, extra = '') =>
+    `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}"${extra}/>`;
+
+  // Grid lines, decade labels and the plot frame (no traces).
+  function graphGrid(r) {
+    const out = [];
+    const dy = (G.bottom - G.top) / G.divs;
+    for (let i = 1; i < G.divs; i++) out.push(line(G.left, G.top + i * dy, G.right, G.top + i * dy, COLOR.grid));
+    for (let decade = r.fStart; decade < r.fStop * 1.001; decade *= 10) {
+      const x = xOf(decade, r);
+      out.push(line(x, G.top, x, G.bottom, COLOR.grid));
+      out.push(text(x, G.bottom + 17, 'middle', '#000', formatEng(decade, 3) + 'Hz'));
+      if (decade < r.fStop / 1.001) {
+        for (let k = 2; k <= 9; k++) {
+          const xm = xOf(decade * k, r);
+          out.push(line(xm, G.top, xm, G.bottom, COLOR.minor));
+        }
+      }
+    }
+    out.push(`<rect x="${G.left}" y="${G.top}" width="${G.right - G.left}" height="${G.bottom - G.top}" ` +
+      `fill="none" stroke="#000"/>`);
+    return out.join('');
+  }
+
+  // Draws into #graph. Never throws: on any problem it shows a short note instead.
+  function renderGraph(solvedList) {
+    const r = graphRange();
+    const dy = (G.bottom - G.top) / G.divs;
+    let body;
+    try {
+      body = graphTraces(solvedList, r, dy);
+    } catch (e) {
+      console.error(e);
+      body = null;
+    }
+    if (!body) {
+      body = text((G.left + G.right) / 2, (G.top + G.bottom) / 2, 'middle', '#000', 'No response — see message');
+    }
+    $('graph').innerHTML =
+      `<svg width="${G.w}" height="${G.h}" viewBox="0 0 ${G.w} ${G.h}" font-family="Arial, Helvetica, sans-serif" ` +
+      `font-size="11" role="img" aria-label="Gain, phase and group delay against frequency">` +
+      `<defs><clipPath id="plot-clip"><rect x="${G.left}" y="${G.top}" width="${G.right - G.left}" ` +
+      `height="${G.bottom - G.top}"/></clipPath></defs>` +
+      graphGrid(r) + body +
+      `<rect id="plot-hit" x="${G.left}" y="${G.top}" width="${G.right - G.left}" height="${G.bottom - G.top}" ` +
+      `fill="transparent" style="cursor:crosshair"><title>Click to set the cursor frequency</title></rect>` +
+      '</svg>';
+  }
+
+  // Axis labels and traces, or null when there is nothing to draw
+  // (no stages, or a stage that could not be solved).
+  function graphTraces(solvedList, r, dy) {
+    if (!solvedList.length || solvedList.some(s => s.error)) return null;
+    const pts = FH.response.sweep(solvedList, r.fStart, r.fStop, 400, null);
+
+    const dbTop = gainTop(20 * Math.log10(totalGain(solvedList)));
+    const delays = pts.map(p => p.gdSec).filter(Number.isFinite);
+    const maxDelay = Math.max(0, ...delays);
+    const step = delayStep(maxDelay > 0 ? maxDelay : 1 / state.fc);
+
+    const out = [];
+    for (let i = 0; i <= G.divs; i++) {
+      const y = G.top + i * dy + 4;
+      out.push(text(G.left - 3, y, 'end', COLOR.gain, (dbTop - 10 * i) + 'dB'));
+      out.push(text(G.right + 3, y, 'start', COLOR.phase, PHASE_LABELS[i]));
+      out.push(text(G.w - 2, y, 'end', COLOR.delay, delayText(step * (G.divs - i))));
+    }
+
+    const x = p => xOf(p.f, r);
+    const gainY = p => yOf(p.db, dbTop, 10 * G.divs);
+    const traces = [];
+    if (maxDelay > 0) {
+      traces.push(`<path d="${pathOf(pts, x, p => yOf(p.gdSec, step * G.divs, step * G.divs))}" ` +
+        `fill="none" stroke="${COLOR.delay}"/>`);
+    }
+    traces.push(`<path d="${pathOf(pts, x, p => yOf(p.deg, PHASE_TOP, PHASE_SPAN))}" fill="none" stroke="${COLOR.phase}"/>`);
+    traces.push(`<path d="${pathOf(pts, x, gainY)}" fill="none" stroke="${COLOR.gain}" stroke-width="1.5"/>`);
+    if (state.showReal && state.gbw) { // drawn over the ideal trace so the dashes show where they differ
+      const real = FH.response.sweep(solvedList, r.fStart, r.fStop, 400, state.gbw);
+      traces.push(`<path d="${pathOf(real, x, gainY)}" fill="none" stroke="${COLOR.gain}" ` +
+        'stroke-width="1.5" stroke-dasharray="5 3"/>');
+    }
+    if (state.cursor >= r.fStart && state.cursor <= r.fStop) {
+      const xc = xOf(state.cursor, r).toFixed(1);
+      traces.push(line(xc, G.top, xc, G.bottom, COLOR.cursor, ' stroke-width="1.5"'));
+    }
+    out.push(`<g clip-path="url(#plot-clip)">${traces.join('')}</g>`);
+    return out.join('');
+  }
+
+  // Clicking the plot sets the cursor (3 significant figures) through commit(),
+  // so the table header, the Cursor Freq. box and the saved hash all follow.
+  $('graph').addEventListener('click', e => {
+    if (e.target.id !== 'plot-hit') return;
+    const svg = e.currentTarget.querySelector('svg');
+    const box = svg.getBoundingClientRect();
+    const xPx = (e.clientX - box.left) * G.w / box.width;
+    const f = Number(fOf(xPx, graphRange()).toPrecision(3));
+    if (f !== state.cursor) commit({ ...state, cursor: f }, null);
+  });
 
   // ---- Help box -----------------------------------------------------------------
   // Shows, in order of priority:
@@ -1446,10 +1601,15 @@
   const SEED_HINT = 'This entry scales the network impedance. Higher values reduce source loading and power ' +
     'but add noise. 10k suits many applications.';
 
+  const GBW_HINT = 'Enter your op amp\'s gain-bandwidth product (e.g. 10M) and tick Show real response ' +
+    'to add a dashed green trace: the gain with that op amp, modelled as a single pole. ' +
+    'Peaking above the ideal trace means the op amp is too slow for this filter. Blank turns it off.';
+
   // Hint for a focused field, or null to show the description.
   function hintFor(el) {
     if (!el || !el.id) return null;
     if (el.id === 'seed') return SEED_HINT;
+    if (el.id === 'gbw' || el.id === 'showReal') return GBW_HINT;
     const row = el.dataset && el.dataset.row;
     if (!row) return null;
     const solved = lastSolved.find(s => s.stage.label === row);
@@ -1512,6 +1672,8 @@
     show($('rippleDb'), cheby ? plain(state.rippleDb) : '');
     show($('cursor'), formatEng(state.cursor, 4));
     show($('seed'), formatEng(state.seed, 3));
+    show($('gbw'), state.gbw ? formatEng(state.gbw, 3) : '');
+    $('showReal').checked = state.showReal;
     syncGrid();
   }
 
@@ -1647,6 +1809,17 @@
       commit({ ...state, entries: { ...state.entries, [row]: entry } }, el);
     });
   });
+
+  // Op-amp GBW: blank = none (no overlay); otherwise a positive value like 10M.
+  onCommitKeys($('gbw'), () => {
+    const el = $('gbw');
+    el.classList.remove('refused');
+    const v = parseEng(el.value);
+    if (Number.isNaN(v)) return refuse(el, 'Op-amp GBW must be above 0. Enter a value like 10M or 1M, or leave it blank.');
+    if (v === state.gbw) { syncControls(); return; } // unchanged
+    commit({ ...state, gbw: v }, el);
+  });
+  $('showReal').addEventListener('change', e => commit({ ...state, showReal: e.target.checked }, e.target));
 
   // Typing a new URL hash (or pasting a link) loads that state.
   window.addEventListener('hashchange', () => {
