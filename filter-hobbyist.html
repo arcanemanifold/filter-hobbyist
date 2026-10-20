@@ -1506,12 +1506,12 @@
     $('rippleDb').disabled = !cheby;
     $('lbl-ripple').style.color = cheby ? '' : 'var(--disabled)';
 
-    $('poles').value = String(state.poles);
-    $('bpQ').value = plain(state.bpQ);
-    $('fc').value = formatEng(state.fc, 4);
-    $('rippleDb').value = cheby ? plain(state.rippleDb) : '';
-    $('cursor').value = formatEng(state.cursor, 4);
-    $('seed').value = formatEng(state.seed, 3);
+    show($('poles'), String(state.poles));
+    show($('bpQ'), plain(state.bpQ));
+    show($('fc'), formatEng(state.fc, 4));
+    show($('rippleDb'), cheby ? plain(state.rippleDb) : '');
+    show($('cursor'), formatEng(state.cursor, 4));
+    show($('seed'), formatEng(state.seed, 3));
     syncGrid();
   }
 
@@ -1528,8 +1528,8 @@
       const part = el.dataset.part;
       el.disabled = !partEnabled(st, part);
       const v = (state.entries[el.dataset.row] || {})[part];
-      if (el.disabled || v == null) el.value = '';
-      else el.value = part === 'gain' ? plain(v) : formatEng(v, 3);
+      if (el.disabled || v == null) show(el, '');
+      else show(el, part === 'gain' ? plain(v) : formatEng(v, 3));
     });
   }
 
@@ -1601,10 +1601,20 @@
     seed: () => positiveEng('R1 Seed', '10k or 4k7'),
   };
 
-  // Commit on blur after an edit ('change') and on Enter.
+  // Put a value in a text box and remember the text, so an untouched box
+  // is never re-parsed (re-parsing "4.57n" would replace a typed 4.567n).
+  function show(el, text) {
+    el.value = text;
+    el.dataset.shown = text;
+  }
+
+  // Commit on blur after an edit ('change') and on Enter, but only when the
+  // text differs from what was last shown. That also stops Enter + the
+  // change event that follows it from applying twice.
   function onCommitKeys(el, apply) {
-    el.addEventListener('change', apply);
-    el.addEventListener('keydown', e => { if (e.key === 'Enter') apply(); });
+    const applyIfEdited = () => { if (el.value !== el.dataset.shown) apply(); };
+    el.addEventListener('change', applyIfEdited);
+    el.addEventListener('keydown', e => { if (e.key === 'Enter') applyIfEdited(); });
   }
 
   Object.keys(TEXT_FIELDS).forEach(key => {
