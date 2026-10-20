@@ -69,7 +69,7 @@
   }
   #help {
     left: 0; top: 46px; width: 208px; height: 244px; box-sizing: border-box;
-    padding: 3px 4px; background: #fff; overflow: auto; line-height: 14px;
+    padding: 3px 4px; background: #fff; overflow: auto; line-height: 14px; white-space: pre-line;
     border: 1px solid; border-color: var(--shadow) var(--hilite) var(--hilite) var(--shadow);
     box-shadow: inset 1px 1px 0 var(--dark);
   }
@@ -80,13 +80,22 @@
   /* Right column: Settings panel, then the results table. */
   #settings { left: 554px; top: 7px; width: 322px; height: 290px; }
   #results  { left: 512px; top: 300px; width: 364px; height: 180px; }
-  #summary  { left: 524px; top: 482px; width: 340px; height: 32px; text-align: center; line-height: 15px; }
-  #phase-note { left: 560px; top: 520px; width: 280px; color: #e00000; text-align: center; line-height: 15px; }
+  #summary  { left: 524px; top: 452px; width: 340px; height: 32px; text-align: center; line-height: 15px; }
+  #phase-note { left: 560px; top: 490px; width: 280px; color: #e00000; text-align: center; line-height: 15px; }
 
   /* Optional Entry grid column headers are centred over their boxes. */
   .colhead { width: 46px; text-align: center; }
   .colhead.small { font-size: 11px; line-height: 11px; }
   input[type=text].cell { height: 17px; padding: 0 3px; }
+
+  /* Results table (read-only) under the Settings panel. */
+  #results table { border-collapse: collapse; table-layout: fixed; width: 100%; font-size: 11px; }
+  #results th { font-weight: normal; line-height: 13px; padding: 0 1px 2px; vertical-align: bottom; white-space: nowrap; }
+  #results td { height: 16px; padding: 0 3px; text-align: center; white-space: nowrap; overflow: hidden; }
+  #results td.val { background: #fff; border: 1px solid var(--shadow); }
+  #results td.rowhead { text-align: right; padding-right: 4px; }
+  #results td.error { color: var(--refuse); text-align: left; }
+  #results tr.totals td.val { border-top: 2px solid var(--shadow); }
 </style>
 </head>
 <body>
@@ -158,7 +167,7 @@
       <span class="lbl" style="left:63px; top:36px;">Cap.</span>
     </div>
 
-    <!-- Optional Entry grid: static markup only; Task 9 wires it. -->
+    <!-- Optional Entry grid: rows A-E and Real. Behaviour is in the ui module. -->
     <div id="fr-entry" class="frame" style="left:100px; top:152px; width:220px; height:134px;">
       <span class="caption">Optional Entry</span>
       <span class="lbl colhead" style="left:30px; top:8px;">C1</span>
@@ -1248,37 +1257,116 @@
   const $ = id => document.getElementById(id);
 
   const PASSBAND_NAMES = { lp: 'Low-Pass', hp: 'High-Pass', bp: 'Band-Pass', notch: 'Notch' };
+  const CIRCUIT_NAMES = { mfb: 'MFB', sk: 'Sallen-Key' };
+  const RESPONSE_NAMES = { butterworth: 'Butterworth', bessel: 'Bessel', chebyshev: 'Chebyshev' };
 
   // The one live state. Every change goes through commit().
   let state = FH.state.initial(location.hash, safeStorage());
+  // The last solve, one entry per stage (for the table and the help hints).
+  let lastSolved = [];
 
   function safeStorage() {
     try { return window.localStorage; } catch (e) { return null; }
   }
 
-  // ---- Render hooks (filled in by later tasks) --------------------------------
-  // solvedList: one FH.solve.stage() result per stage, in stage order.
-  function renderTable(solvedList) { /* Task 9: results table + summary */ }
+  // ---- Number formats -----------------------------------------------------------
+
+  // 0.5 -> "0.5", 1 -> "1", 0.123456 -> "0.123"
+  const plain = x => String(Number(x.toPrecision(3)));
+  // 3 significant figures; a whole number below 10 keeps one decimal:
+  // 1 -> "1.0", 1.83 -> "1.83", 10.09 -> "10.1", 20000 -> "20000"
+  const gainText = g => { const t = plain(g); return g < 10 && !/\./.test(t) ? t + '.0' : t; };
+  // 1000 -> "1.000 kHz" (4 significant figures, space before the unit prefix)
+  const hzText = f => formatEng(f, 4).replace(/([^\d.]?)$/, ' $1Hz');
+  const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  // ---- Solve and render -------------------------------------------------------
+
+  // One FH.solve.stage() result per stage, in stage order (Real first, then A, B, ...).
+  function solveAll(s) {
+    const opts = { resSeries: s.resSeries, capSeries: s.capSeries, seed: s.seed };
+    return FH.stages.build(s).map(st => FH.solve.stage(st, s.circuit, s.entries[st.label] || {}, opts));
+  }
+
+  // Results table: one row per stage plus Totals, then the summary line.
+  //   Passband Gain  from the rounded parts (gainActual); Real is always 1.0
+  //   Fn, Q          the stage targets
+  //   Gain, Phase    at the cursor, from the rounded parts. A stage's gain
+  //                  includes its own passband gain. Phase leaves out the
+  //                  180° of inverting stages (see the red note).
+  //   Req. GBP       rule-of-thumb op amp GBP; blank for band-pass and notch
+  // Totals: product of the gains, cascade dB and degrees. Totals Q is blank.
+  function renderTable(solvedList) {
+    const cursor = state.cursor;
+    const cell = text => `<td class="val">${esc(text)}</td>`;
+    const blank = '<td class="val"></td>';
+    const rows = solvedList.map(s => {
+      const st = s.stage;
+      const head = `<td class="rowhead">${esc(st.label)}</td>`;
+      if (s.error) return `<tr>${head}<td class="val error" colspan="6">${esc(s.error)}</td></tr>`;
+      const p = FH.response.point([s], cursor, null);
+      const gbp = FH.response.requiredGBP(s);
+      return '<tr>' + head +
+        cell(st.kind === 'real' ? '1.0' : s.gainActual.toPrecision(3)) +
+        cell(formatEng(st.fn, 5) + 'Hz') +
+        (st.q == null ? blank : cell(st.q.toPrecision(4))) +
+        cell(p.db.toFixed(2) + ' dB') +
+        cell(p.deg.toFixed(1) + '°') +
+        (gbp == null ? blank : cell(formatEng(gbp, 3) + 'Hz')) +
+        '</tr>';
+    });
+    // Pad to five rows (the most stages there can be) so the table keeps its size.
+    while (rows.length < MAX_ROWS) rows.push('<tr><td></td>' + blank.repeat(6) + '</tr>');
+
+    let totals = `<tr class="totals"><td></td>${blank}<td>Totals</td>${blank}${blank}${blank}<td></td></tr>`;
+    const ok = solvedList.length > 0 && solvedList.every(s => !s.error);
+    if (ok) {
+      const t = FH.response.point(solvedList, cursor, null);
+      totals = '<tr class="totals"><td></td>' + cell(totalGain(solvedList).toPrecision(3)) + '<td>Totals</td>' +
+        blank + cell(t.db.toFixed(2) + ' dB') + cell(t.deg.toFixed(1) + '°') + '<td></td></tr>';
+    }
+
+    $('results').innerHTML =
+      '<table>' +
+      '<colgroup><col style="width:28px"><col style="width:52px"><col style="width:64px">' +
+      '<col style="width:46px"><col style="width:62px"><col style="width:54px"><col style="width:54px"></colgroup>' +
+      '<tr><th></th><th rowspan="2">Passband Gain<br>(Vout/Vin)</th><th rowspan="2">Fn</th><th rowspan="2">Q</th>' +
+      `<th colspan="2">Response at ${esc(formatEng(cursor, 4))} Hz.</th><th rowspan="2">Req.<br>GBP</th></tr>` +
+      '<tr><th></th><th>Gain</th><th>Phase<span style="color:var(--refuse)">*</span></th></tr>' +
+      rows.join('') + totals + '</table>';
+
+    $('summary').textContent = ok ? summaryText(solvedList) : '';
+  }
+
+  const MAX_ROWS = 5;
+  const totalGain = list => list.reduce((g, s) => g * s.gainActual, 1);
+
+  // e.g. "MFB, 4-Pole Low-Pass Chebyshev 1.0 dB: 1.000 kHz Cutoff, Passband Gain of 1.0"
+  function summaryText(solvedList) {
+    const gain = 'Passband Gain of ' + gainText(totalGain(solvedList));
+    const q = 'Q of ' + plain(state.bpQ);
+    if (state.passband === 'notch') return `Notch: ${hzText(state.fc)} Center, ${q}, ${gain}`;
+    if (state.passband === 'bp') {
+      const n = state.poles;
+      return `MFB, ${n}-Section Band-Pass: ${hzText(state.fc)} Center, ${q}, ${gain}`;
+    }
+    let response = RESPONSE_NAMES[state.response];
+    if (state.response === 'chebyshev') response += ' ' + gainText(state.rippleDb) + ' dB';
+    return `${CIRCUIT_NAMES[state.circuit]}, ${state.poles}-Pole ${PASSBAND_NAMES[state.passband]} ${response}: ` +
+      `${hzText(state.fc)} Cutoff, ${gain}`;
+  }
+
   function renderGraph(solvedList) { /* Task 10: gain / phase / delay plot */ }
   function renderSchematics(solvedList) { /* Task 11: one SVG per stage */ }
 
-  // Context help box. A refusal is shown in red until the next message.
-  function setHelp(text, isRefusal) {
-    const box = $('help');
-    box.textContent = text || '';
-    box.classList.toggle('refusal', !!isRefusal);
-  }
-
   // build -> solve each stage -> render. Also saves the state.
   function recompute() {
-    const stages = FH.stages.build(state);
-    const opts = { resSeries: state.resSeries, capSeries: state.capSeries, seed: state.seed };
-    const solvedList = stages.map(st => FH.solve.stage(st, state.circuit, state.entries[st.label] || {}, opts));
-    FH.ui.renderTable(solvedList);
-    FH.ui.renderGraph(solvedList);
-    FH.ui.renderSchematics(solvedList);
+    lastSolved = solveAll(state);
+    FH.ui.renderTable(lastSolved);
+    FH.ui.renderGraph(lastSolved);
+    FH.ui.renderSchematics(lastSolved);
     save();
-    return solvedList;
+    return lastSolved;
   }
 
   // Write the URL hash (shareable link) and localStorage (last session).
@@ -1288,6 +1376,106 @@
     try { history.replaceState(null, '', hash); } catch (e) { location.hash = hash; }
     try { window.localStorage.setItem(FH.state.STORAGE_KEY, JSON.stringify(state)); } catch (e) { /* storage blocked */ }
   }
+
+  // ---- Help box -----------------------------------------------------------------
+  // Shows, in order of priority:
+  //   1. a refusal (red), until the next successful change of any control
+  //   2. a notice set by the change that just happened (e.g. Sections capped at 5)
+  //   3. the hint for the field that has focus (caps, gains, R1 Seed)
+  //   4. the description of the selected filter type
+
+  let refusalShowing = false;
+
+  function setHelp(text, isRefusal) {
+    const box = $('help');
+    box.textContent = text || '';
+    box.classList.toggle('refusal', !!isRefusal);
+    refusalShowing = !!isRefusal;
+  }
+
+  const DESCRIPTIONS = {
+    butterworth: 'Butterworth filters have the flattest possible passband, with no ripple, and a ' +
+      'moderate roll-off into the stopband. Step response overshoot is moderate and grows with the number of poles.',
+    chebyshev: 'Chebyshev filters allow ripple in the passband (set by Ripple) in exchange for a steeper ' +
+      'transition into the stopband than Butterworth. More ripple gives a sharper cutoff but more overshoot and ringing.',
+    bessel: 'Bessel filters have nearly constant group delay across the passband, so pulses pass with very ' +
+      'little overshoot. The price is a gentler roll-off than Butterworth for the same number of poles.',
+    bp: 'A band-pass filter passes a band centred on Center Freq. and rejects frequencies either side. ' +
+      'Q sets the bandwidth of each section (bandwidth = center / Q). The sections are identical MFB band-pass ' +
+      'stages in cascade: more sections give steeper skirts and a narrower overall band.',
+    notch: 'A notch (band-reject) filter removes a narrow band centred on Center Freq. and passes the rest. ' +
+      'Q sets the notch width (width = center / Q). It is built from an MFB band-pass section whose output ' +
+      'is subtracted from the input by a summing amplifier; Gain sets the summer gain.',
+  };
+
+  function description() {
+    const pb = state.passband;
+    return pb === 'bp' || pb === 'notch' ? DESCRIPTIONS[pb] : DESCRIPTIONS[state.response];
+  }
+
+  // What each capacitor does, by circuit. Naming follows the schematics:
+  //   LP (MFB and SK):  C1 = feedback, C2 = to ground
+  //   MFB HP:           C1 = input, C2 = series to the inverting input, C3 = feedback (gain = C1/C3)
+  //   SK HP:            C1 = input, C2 = second series cap (to the + input)
+  //   BP and notch:     C1 = feedback, C2 = to the inverting input
+  //   Real pole:        C1 = to ground (LP) or series input cap (HP)
+  function capRole(st, part) {
+    if (st.kind === 'real') {
+      return st.role === 'hp' ? 'the series input capacitor' : 'the capacitor to ground';
+    }
+    const roles = {
+      lp: { c1: 'the feedback capacitor', c2: 'the capacitor to ground' },
+      hp: state.circuit === 'mfb'
+        ? { c1: 'the input capacitor', c2: 'the series capacitor to the inverting input',
+            c3: 'the feedback capacitor (gain = C1/C3)' }
+        : { c1: 'the input capacitor', c2: 'the second series capacitor, to the + input' },
+      bp: { c1: 'the feedback capacitor', c2: 'the capacitor to the inverting input' },
+      notch: { c1: 'the band-pass feedback capacitor', c2: 'the band-pass capacitor to the inverting input' },
+    };
+    return roles[st.role][part];
+  }
+
+  function gainHint(st) {
+    if (st.role === 'notch') return 'Gain sets the passband gain of the notch\'s summing amplifier. Blank means 1.';
+    if (st.role === 'bp') return 'Gain is the section\'s gain at the center frequency. Blank uses the default, equal to Q.';
+    if (state.circuit === 'sk') return 'Gain is this stage\'s passband gain. Sallen-Key needs 1 or more. Blank means 1.';
+    if (st.role === 'hp') return 'Gain is this stage\'s passband gain, set by C1/C3. Blank means 1.';
+    return 'Gain is this stage\'s passband gain. Blank means 1.';
+  }
+
+  const SEED_HINT = 'This entry scales the network impedance. Higher values reduce source loading and power ' +
+    'but add noise. 10k suits many applications.';
+
+  // Hint for a focused field, or null to show the description.
+  function hintFor(el) {
+    if (!el || !el.id) return null;
+    if (el.id === 'seed') return SEED_HINT;
+    const row = el.dataset && el.dataset.row;
+    if (!row) return null;
+    const solved = lastSolved.find(s => s.stage.label === row);
+    if (!solved) return null;
+    const part = el.dataset.part;
+    const where = row === 'Real' ? 'the real-pole section' : 'Section ' + row;
+    if (part === 'gain') {
+      const now = solved.parts ? `The current gain of this stage is ${gainText(solved.gainActual)} V/V. ` : '';
+      return `${now}You may enter a new value, or clear the box for the default.\n\n${gainHint(solved.stage)}`;
+    }
+    const name = part.toUpperCase();
+    const value = solved.parts && solved.parts[name];
+    const now = value ? `The current value of this capacitor is ${formatEng(value)}F. ` : '';
+    return `${now}You may enter a new value, or clear the box to let the program choose it.\n\n` +
+      `${name} is ${capRole(solved.stage, part)} of ${where}.`;
+  }
+
+  // Show the hint for the focused field, else the description. A refusal stays.
+  function showContextHelp() {
+    if (refusalShowing) return;
+    setHelp(hintFor(document.activeElement) || description());
+  }
+
+  document.addEventListener('focusin', showContextHelp);
+  // On focusout the next element isn't focused yet; look once it is.
+  document.addEventListener('focusout', () => setTimeout(showContextHelp, 0));
 
   // ---- Settings panel ---------------------------------------------------------
 
@@ -1324,17 +1512,49 @@
     $('rippleDb').value = cheby ? plain(state.rippleDb) : '';
     $('cursor').value = formatEng(state.cursor, 4);
     $('seed').value = formatEng(state.seed, 3);
+    syncGrid();
   }
 
-  // 0.5 -> "0.5", 1 -> "1", 0.123456 -> "0.123"
-  const plain = x => String(Number(x.toPrecision(3)));
+  // Optional Entry grid: a cell is enabled only where the stage has that part.
+  //   Rows A-E and Real follow the stages that exist.
+  //   Real: C1 only.  C3: MFB high-pass only.  Gain: every pair stage (incl. BP, notch).
+  // Entered caps are shown with formatEng (4.70n); gains as plain numbers
+  // (0.5, not 500m). Empty cells use the computed part.
+  function syncGrid() {
+    const byLabel = {};
+    FH.stages.build(state).forEach(st => { byLabel[st.label] = st; });
+    document.querySelectorAll('#fr-entry input[data-row]').forEach(el => {
+      const st = byLabel[el.dataset.row];
+      const part = el.dataset.part;
+      el.disabled = !partEnabled(st, part);
+      const v = (state.entries[el.dataset.row] || {})[part];
+      if (el.disabled || v == null) el.value = '';
+      else el.value = part === 'gain' ? plain(v) : formatEng(v, 3);
+    });
+  }
 
-  // Apply a change: normalize -> show it -> recompute (which saves).
-  function commit(next) {
-    document.querySelectorAll('#app .refused').forEach(el => el.classList.remove('refused'));
-    state = FH.state.normalize(next);
+  function partEnabled(st, part) {
+    if (!st) return false;
+    if (st.kind === 'real') return part === 'c1';
+    if (part === 'c3') return st.role === 'hp' && state.circuit === 'mfb';
+    return true;
+  }
+
+  // Apply a change: normalize -> trial solve -> show it -> recompute (which saves).
+  // If any stage can't be solved, the change is refused at `el` (the control
+  // that made it) and the old state stays. `notice` is an informational message
+  // that this change produced (shown instead of the usual help).
+  function commit(next, el, notice) {
+    const candidate = FH.state.normalize(next);
+    const failed = solveAll(candidate).find(s => s.error);
+    if (failed && el) { refuse(el, failed.error); return; }
+    document.querySelectorAll('#app .refused').forEach(x => x.classList.remove('refused'));
+    state = candidate;
     syncControls();
     recompute();
+    refusalShowing = false;
+    if (notice) setHelp(notice);
+    else showContextHelp();
   }
 
   // Refuse a typed value: say why (with the bound), put the old value back,
@@ -1343,21 +1563,22 @@
     setHelp(message, true);
     syncControls();
     el.classList.add('refused');
-    setTimeout(() => { el.focus(); el.select(); }, 0);
+    setTimeout(() => { el.focus(); if (el.select) el.select(); }, 0);
   }
 
   // Dropdowns: the value maps straight onto a state key.
   ['circuit', 'response', 'resSeries', 'capSeries'].forEach(key => {
-    $(key).addEventListener('change', e => commit({ ...state, [key]: e.target.value }));
+    $(key).addEventListener('change', e => commit({ ...state, [key]: e.target.value }, e.target));
   });
 
   $('passband').addEventListener('change', e => {
     const next = { ...state, passband: e.target.value };
+    let notice = null;
     if (next.passband === 'bp' && state.poles > 5) {
       next.poles = 5;
-      setHelp('Band-Pass allows 1 to 5 sections, so Sections is now 5.');
+      notice = 'Band-Pass allows 1 to 5 sections, so Sections is now 5.';
     }
-    commit(next);
+    commit(next, e.target, notice);
   });
 
   // Text entries. Each parser returns { value } or { error } (the refusal text).
@@ -1380,18 +1601,41 @@
     seed: () => positiveEng('R1 Seed', '10k or 4k7'),
   };
 
+  // Commit on blur after an edit ('change') and on Enter.
+  function onCommitKeys(el, apply) {
+    el.addEventListener('change', apply);
+    el.addEventListener('keydown', e => { if (e.key === 'Enter') apply(); });
+  }
+
   Object.keys(TEXT_FIELDS).forEach(key => {
     const el = $(key);
-    const apply = () => {
+    onCommitKeys(el, () => {
       el.classList.remove('refused');
       const r = TEXT_FIELDS[key]()(el.value);
       if (r.error) return refuse(el, r.error);
       if (r.value === state[key]) { syncControls(); return; } // unchanged: just tidy the display
-      setHelp('');
-      commit({ ...state, [key]: r.value });
-    };
-    el.addEventListener('change', apply);                 // blur after an edit
-    el.addEventListener('keydown', e => { if (e.key === 'Enter') apply(); });
+      commit({ ...state, [key]: r.value }, el);
+    });
+  });
+
+  // Optional Entry cells: blank clears the override, a value sets it, and
+  // anything unparseable (or <= 0) is refused. Solve errors (cap above 1uF,
+  // cap ratio too small, gain out of range) are refused by commit().
+  const CAP_FORMAT_MSG = 'Enter a value like 4.7n or 4n7';
+  const GAIN_FORMAT_MSG = 'Enter a gain like 2 or 1.5';
+
+  document.querySelectorAll('#fr-entry input[data-row]').forEach(el => {
+    onCommitKeys(el, () => {
+      el.classList.remove('refused');
+      const row = el.dataset.row, part = el.dataset.part;
+      const v = parseEng(el.value);
+      if (Number.isNaN(v)) return refuse(el, part === 'gain' ? GAIN_FORMAT_MSG : CAP_FORMAT_MSG);
+      const old = state.entries[row] || {};
+      if (v === null ? old[part] == null : old[part] === v) { syncControls(); return; } // unchanged
+      const entry = { ...old };
+      if (v === null) delete entry[part]; else entry[part] = v;
+      commit({ ...state, entries: { ...state.entries, [row]: entry } }, el);
+    });
   });
 
   // Typing a new URL hash (or pasting a link) loads that state.
@@ -1399,6 +1643,7 @@
     state = FH.state.decodeHash(location.hash);
     syncControls();
     recompute();
+    showContextHelp();
   });
 
   FH.ui = {
@@ -1408,6 +1653,7 @@
 
   syncControls();
   recompute();
+  showContextHelp();
 })();
 </script>
 </body>
