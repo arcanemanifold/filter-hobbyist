@@ -1422,7 +1422,7 @@
         : cell(s.gainActual.toPrecision(3));
       return '<tr>' + head + gainCell +
         cell(formatEng(st.fn, 5) + 'Hz') +
-        (st.q == null ? blank : cell(st.q.toPrecision(4))) +
+        (st.q == null ? blank : cell(formatEng(st.q, 5))) + // 5 sig. figs like FilterPro (691.05m)
         cell(p.db.toFixed(2) + ' dB') +
         cell(p.deg.toFixed(1) + '°') +
         (gbp == null ? blank : cell(formatEng(gbp, 3) + 'Hz')) +
@@ -1437,7 +1437,7 @@
       const t = FH.response.point(solvedList, cursor, null);
       const q = FH.response.totalsQ(solvedList, state.passband);
       totals = '<tr class="totals"><td></td>' + cell(totalGain(solvedList).toPrecision(3)) + '<td>Totals</td>' +
-        (q == null ? blank : cell(q.toPrecision(4))) +
+        (q == null ? blank : cell(formatEng(q, 5))) +
         cell(t.db.toFixed(2) + ' dB') + cell(t.deg.toFixed(1) + '°') + '<td></td></tr>';
     }
 
