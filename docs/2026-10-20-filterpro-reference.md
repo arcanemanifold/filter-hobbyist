@@ -67,3 +67,21 @@ These are left as they are, and recorded in `docs/2026-10-20-build-rulings.md`:
 - **Sallen-Key required GBP:** FilterPro asks for 100k / 223k at unity gain for Q 0.54 / 1.31. Our formula gives 82k / 308k.
 - **Band-pass and notch Totals Q:** FilterPro shows 23.97 (band-pass, 4 × Q10) and 9.81 (notch). We show the measured centre/bandwidth: 23.04 and 10.01.
 - **Stage gain with gain > 1:** FilterPro appears to show a stage's gain on the next row. We show each stage's own gain; the totals match.
+- **Real-pole Fn and its required GBP:** FilterPro displays fc·√wn; we display fc·wn. This only shows up on odd orders that aren't Butterworth, where wn ≠ 1.
+  - Chebyshev 1 dB 3-pole (wn 0.49417): FilterPro shows 702.97 Hz; we show 494.17 Hz.
+  - Bessel 3-pole (wn 1.3227): FilterPro shows 1.1501 kHz; we show 1.3227 kHz.
+  - FilterPro's own parts and response agree with us. Its 9.76k / 33n is 1/(2π·R·C) = 494 Hz, and its −0.17 dB / −11.4° at 100 Hz fits 494 Hz (a 703 Hz pole would give −0.09 dB / −8.1°). So the √ is a display bug.
+  - The real stage's GBP is 50·Fn in both programs, so FilterPro's number inherits the error: 35.1k / 57.5k against our 24.7k / 66.1k.
+
+### Default-cap math, worked example (3-pole, 1 kHz, E12 caps, seed 10k, section A)
+
+Our rule: C0 = 1/(2π·Fn·Seed). Target C2/C1 = 1.5 × 4Q²(1+G). Then C1 = C0/√r and C2 = C0·√r, each rounded to the series.
+
+| | Fn, Q | C0 | Minimum ratio | Ours | FilterPro |
+|---|---|---|---|---|---|
+| Chebyshev 1 dB | 997.1 Hz, 2.0177 | 15.96n | 32.6 | 2.2n / 120n | 2.2n / 120n |
+| Bessel | 1447.6 Hz, 0.69105 | 10.99n | 3.82 | 4.7n / 27n | 5.6n / 33n |
+
+In the Bessel case, FilterPro's pair has about the same ratio (5.9 against our 5.7) but is centred about 24 % higher (13.6n against 11.0n). With the same caps entered, the resistors come out identical.
+
+**Decision (2026-10-28):** neither difference is worth chasing. Our real-pole math is the correct one, and default caps are only a starting point; they get hand-tuned in LTspice anyway.
